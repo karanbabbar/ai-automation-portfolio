@@ -1,0 +1,362 @@
+{
+  "name": "Meal Planner State Engine v1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "v2/meal-planning",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b69fc9c8-9d0f-43b4-926b-6a9a56a17d43",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        112
+      ],
+      "webhookId": "1b027151-ceb0-4df7-8f15-81067a66dd81"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT u.name, u.daily_calories, u.daily_protein_g, u.daily_carbs_g, u.daily_fat_g, u.meals_per_day, u.goal, u.weight_kg, u.target_weight_kg, u.supplement_protein_g, u.meal_protein_budget_g, u.protein_distribution, s.conversation_history, s.current_stage, s.context, (SELECT json_agg(json_build_object('product_name', p.product_name, 'category', p.category, 'cut_type', p.cut_type, 'pack_size_grams', p.pack_size_grams, 'pack_size_label', p.pack_size_label, 'price', p.price, 'protein_per_100g', p.protein_per_100g, 'fat_per_100g', p.fat_per_100g, 'calories_per_100g', p.calories_per_100g, 'protein_per_pack', p.protein_per_pack, 'image_url', p.image_url, 'product_page_url', p.product_page_url, 'meal_relevance', p.meal_relevance) ORDER BY p.protein_per_100g DESC NULLS LAST) FROM products p WHERE p.in_stock = true) as products, (SELECT json_agg(json_build_object('product_name', st.product_name, 'remaining_grams', st.remaining_grams, 'allocations', st.allocations)) FROM stock_tracker st WHERE st.session_id = $1) as stock FROM users u JOIN sessions s ON u.session_id = s.session_id WHERE u.session_id = $1",
+        "options": {
+          "queryReplacement": "={{ $json.body.session_id }}"
+        }
+      },
+      "id": "553f2b66-14f5-4513-ad36-42cbb9012a51",
+      "name": "Get User & Products",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -656,
+        112
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ahyMD9Hc6Yh1MegV",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ============================================================\n// PROTEIN PLANNER STATE ENGINE v1\n// Replaces Agent 2 (meal planning) + Agent 3 (weekly order)\n// Pure deterministic logic - no Claude needed for standard flow\n// ============================================================\n\nconst webhook = $('Webhook').item.json.body;\nconst userData = $('Get User & Products').item.json;\nconst rawMessage = webhook.message || '';\nconst userMessage = (typeof rawMessage === 'string' ? rawMessage : JSON.stringify(rawMessage)).trim().toLowerCase();\nconst products = userData.products || [];\nconst history = userData.conversation_history || [];\n\n// Parse existing state from context or initialize\nlet state;\ntry {\n  state = (typeof userData.context === 'string') ? JSON.parse(userData.context) : (userData.context || null);\n} catch(e) { state = null; }\n\nif (!state || !state.engine_version) {\n  state = {\n    engine_version: 1,\n    step: 'budget_setup',\n    sub_step: 'init',\n    supplement_g: userData.supplement_protein_g || 0,\n    original_protein: userData.daily_protein_g || 0,\n    protein_target: (userData.daily_protein_g || 0) - (userData.supplement_protein_g || 0),\n    meals_per_day: userData.meals_per_day || 3,\n    distribution: null,\n    distribution_label: null,\n    meals: [],\n    current_meal: 0,\n    carried_portions: {},\n    running_price: 0,\n    weekly_plan: null,\n    cart: null,\n    stage_complete: false\n  };\n}\n\n// ============================================================\n// HELPER FUNCTIONS\n// ============================================================\n\nfunction roundTo5(n) { return Math.round(n / 5) * 5; }\n\nfunction getProductsByCategory(cat) {\n  return products.filter(p => p.category && p.category.toLowerCase() === cat.toLowerCase());\n}\n\nfunction getProductsByCut(cat, cut) {\n  return products.filter(p => {\n    const pCat = (p.category || '').toLowerCase();\n    const pCut = (p.cut_type || '').toLowerCase();\n    return pCat === cat.toLowerCase() && pCut === cut.toLowerCase();\n  });\n}\n\nfunction findProduct(name) {\n  return products.find(p => p.product_name.toLowerCase() === name.toLowerCase());\n}\n\nfunction calcDistribution(target, label) {\n  const t = target;\n  if (label === 'Equal') {\n    const base = Math.floor(t / 3);\n    return { breakfast: base, lunch: base, dinner: t - (base * 2) };\n  }\n  if (label === 'Heavy Breakfast') {\n    return { breakfast: Math.round(t * 0.4), lunch: Math.round(t * 0.3), dinner: t - Math.round(t * 0.4) - Math.round(t * 0.3) };\n  }\n  if (label === 'Heavy Lunch') {\n    return { breakfast: Math.round(t * 0.3), lunch: Math.round(t * 0.4), dinner: t - Math.round(t * 0.3) - Math.round(t * 0.4) };\n  }\n  if (label === 'Heavy Dinner') {\n    return { breakfast: Math.round(t * 0.3), lunch: Math.round(t * 0.3), dinner: t - Math.round(t * 0.3) - Math.round(t * 0.3) };\n  }\n  // Default equal\n  const base = Math.floor(t / 3);\n  return { breakfast: base, lunch: base, dinner: t - (base * 2) };\n}\n\nfunction getCutTypes(category) {\n  const cutMap = {\n    'chicken': ['Boneless', 'Curry Cut', 'Keema', 'Leg & Thigh'],\n    'fish': ['Boneless Cubes', 'Steaks & Cut', 'Whole', 'Fillet', 'Others'],\n    'mutton': ['Curry Cut', 'Mince', 'Mini Pack']\n  };\n  return cutMap[category.toLowerCase()] || [];\n}\n\nfunction calcPortionForProduct(prod, proteinNeeded) {\n  const cat = (prod.category || '').toLowerCase();\n  if (cat === 'eggs') {\n    const eggsNeeded = Math.ceil(proteinNeeded / 6.5);\n    // Derive egg count from pack_size_label like \"Pack of 6\" or \"Pack of 10\"\n    const labelMatch = (prod.pack_size_label || '').match(/(\\d+)/);\n    const eggCount = labelMatch ? parseInt(labelMatch[1]) : 6;\n    return {\n      quantity: eggsNeeded,\n      unit: 'eggs',\n      portion_grams: eggsNeeded * 50,\n      protein_g: Math.round(eggsNeeded * 6.5 * 10) / 10,\n      pack_size: eggCount,\n      pack_price: prod.price\n    };\n  } else {\n    const per100 = prod.protein_per_100g || 20;\n    let grams = roundTo5((proteinNeeded / per100) * 100);\n    if (grams < 50) grams = 50;\n    const actualProtein = Math.round((grams * per100 / 100) * 10) / 10;\n    return {\n      quantity: grams,\n      unit: 'g',\n      portion_grams: grams,\n      protein_g: actualProtein,\n      pack_size: prod.pack_size_grams || 450,\n      pack_price: prod.price\n    };\n  }\n}\n\nfunction buildUtilizationOptions(prod, portion, isLastMeal) {\n  const cat = (prod.category || '').toLowerCase();\n  const options = [];\n  let remaining, remainingText;\n  \n  if (cat === 'eggs') {\n    const packSize = portion.pack_size; // egg count, not grams\n    const used = portion.quantity;\n    remaining = packSize - used;\n    if (remaining <= 0) return { remaining: 'Full pack used', options: [] };\n    remainingText = remaining + ' eggs remaining from pack of ' + packSize;\n    const totalDays = Math.floor(packSize / used);\n    if (totalDays >= 2) {\n      options.push({ label: 'Same meal for ' + totalDays + ' days (' + used + ' eggs/day)', value: 'same_meal_multi_day', days: totalDays });\n    } else if (remaining > 0) {\n      options.push({ label: 'Use remaining ' + remaining + ' eggs next day', value: 'same_meal_multi_day', days: 2 });\n    }\n    if (!isLastMeal) {\n      options.push({ label: 'Use ' + remaining + ' eggs for a different meal today', value: 'other_meal' });\n    }\n  } else {\n    const packSize = portion.pack_size;\n    const used = portion.portion_grams;\n    remaining = packSize - used;\n    if (remaining <= 0) return { remaining: 'Full pack used', options: [] };\n    remainingText = remaining + 'g remaining from ' + packSize + 'g pack';\n    \n    // How many total days does one pack cover?\n    const totalDays = Math.floor(packSize / used);\n    if (totalDays >= 2) {\n      options.push({ label: 'Same meal for ' + totalDays + ' days (' + used + 'g/day)', value: 'same_meal_multi_day', days: totalDays });\n    } else if (remaining > 0) {\n      // Pack doesn't cover 2 full days but has leftovers — still offer multi-day with adjusted portion\n      options.push({ label: 'Use remaining ' + remaining + 'g for next day (lower portion)', value: 'same_meal_multi_day', days: 2 });\n    }\n    if (!isLastMeal) {\n      options.push({ label: 'Use ' + remaining + 'g for a different meal today', value: 'other_meal' });\n    }\n    // Check if smaller pack exists\n    const smallerPacks = products.filter(p => \n      p.product_name !== prod.product_name && \n      (p.category || '').toLowerCase() === cat &&\n      (p.cut_type || '').toLowerCase() === (prod.cut_type || '').toLowerCase() &&\n      p.pack_size_grams < packSize &&\n      p.pack_size_grams >= used\n    );\n    if (smallerPacks.length > 0) {\n      const sp = smallerPacks[0];\n      options.push({ label: 'Switch to ' + sp.pack_size_label + ' pack (₹' + sp.price + ')', value: 'smaller_pack', product: sp.product_name });\n    }\n  }\n  \n  return { remaining: remainingText, remaining_amount: remaining, options: options };\n}\n\nconst mealLabels = ['Breakfast', 'Lunch', 'Dinner'];\n\n// ============================================================\n// PARSE USER SELECTION FROM MESSAGE\n// ============================================================\nfunction parseSelection(msg) {\n  // If already an object (frontend sent JSON object directly), return it\n  if (msg && typeof msg === 'object') return msg;\n  \n  // If string, try to parse as JSON\n  if (typeof msg === 'string') {\n    try {\n      const parsed = JSON.parse(msg);\n      if (parsed && typeof parsed === 'object') return parsed;\n    } catch(e) {}\n  }\n  \n  // Otherwise parse natural language\n  return { raw: String(msg || '') };\n}\n\nconst selection = parseSelection(webhook.message);\n\n// ============================================================\n// STATE MACHINE\n// ============================================================\n\nlet response = null;\nlet needsClaude = false;\nlet claudePrompt = '';\n\n// ---- EDIT/GO-BACK HANDLER ----\nconst editMatch = userMessage.match(/edit\\s*(breakfast|lunch|dinner)/i) || \n                  userMessage.match(/change\\s*(breakfast|lunch|dinner)/i) ||\n                  userMessage.match(/go\\s*back\\s*to\\s*(breakfast|lunch|dinner)/i);\nif (editMatch && state.step !== 'budget_setup') {\n  const editMeal = editMatch[1].toLowerCase();\n  const mealIdx = editMeal === 'breakfast' ? 0 : editMeal === 'lunch' ? 1 : 2;\n  if (mealIdx < state.meals.length) {\n    // Reset this meal and recalculate running price\n    const oldMealProducts = state.meals[mealIdx].products || [];\n    for (const p of oldMealProducts) {\n      const days = p.days_covered || 1;\n      state.running_price -= Math.round((p.pack_price || 0) / days);\n    }\n    if (state.running_price < 0) state.running_price = 0;\n    \n    state.meals[mealIdx] = {\n      label: state.meals[mealIdx].label,\n      target_g: state.meals[mealIdx].target_g,\n      sources: [],\n      cuts: {},\n      products: [],\n      confirmed: false\n    };\n    \n    // Remove any carried portions FROM this meal\n    const mealKey = state.meals[mealIdx].label.toLowerCase();\n    delete state.carried_portions[mealKey];\n    \n    state.current_meal = mealIdx;\n    state.step = 'meal_curation';\n    state.sub_step = 'source_select';\n    \n    const meal = state.meals[mealIdx];\n    const carried = state.carried_portions[mealKey] || [];\n    const carriedP = carried.reduce((s, c) => s + c.protein_g, 0);\n    const effective = Math.max(0, meal.target_g - carriedP);\n    \n    response = makeResponse(\n      \"Editing \" + meal.label + \"! Target: \" + meal.target_g + \"g protein. Choose your protein sources:\",\n      'source_select',\n      {\n        meal_label: meal.label,\n        protein_target: effective,\n        carried_portions: carried,\n        available_sources: [\n          { name: 'eggs', icon: '🥚' },\n          { name: 'chicken', icon: '🍗' },\n          { name: 'fish', icon: '🐟' },\n          { name: 'mutton', icon: '🍖' }\n        ]\n      }\n    );\n  }\n}\n\nfunction makeResponse(message, uiType, uiData, extras) {\n  const resp = {\n    message: message,\n    current_step: state.step,\n    ui_type: uiType,\n    ui_data: uiData,\n    state: state,\n    stage_complete: state.stage_complete\n  };\n  if (extras) Object.assign(resp, extras);\n  return resp;\n}\n\n// ============================================================\n// STEP: budget_setup\n// ============================================================\nif (state.step === 'budget_setup') {\n  \n  if (state.sub_step === 'init') {\n    // First message - ask about supplements\n    state.sub_step = 'awaiting_supplement';\n    \n    response = makeResponse(\n      \"Let's plan your protein meals! Your daily target is \" + state.original_protein + \"g protein. Do you take any protein supplements?\",\n      'supplement_ask',\n      {\n        original_protein: state.original_protein,\n        meals_per_day: state.meals_per_day,\n        options: [\n          { label: 'No supplements', value: 'none', grams: 0 },\n          { label: '25g (1 scoop whey)', value: '25', grams: 25 },\n          { label: '30g supplement', value: '30', grams: 30 },\n          { label: '50g supplement', value: '50', grams: 50 },\n          { label: 'Custom amount', value: 'custom', grams: 0 }\n        ]\n      }\n    );\n  }\n  \n  else if (state.sub_step === 'awaiting_supplement') {\n    let suppGrams = 0;\n    \n    if (selection.supplement_grams !== undefined) {\n      suppGrams = Number(selection.supplement_grams) || 0;\n    } else if (selection.supplement) {\n      suppGrams = Number(selection.supplement) || 0;\n    } else {\n      // Parse from text\n      const numMatch = userMessage.match(/(\\d+)\\s*g/);\n      if (numMatch) {\n        suppGrams = parseInt(numMatch[1]);\n      } else if (userMessage.includes('no') || userMessage.includes('none') || userMessage.includes('0')) {\n        suppGrams = 0;\n      } else {\n        const numOnly = userMessage.match(/(\\d+)/);\n        if (numOnly) suppGrams = parseInt(numOnly[1]);\n      }\n    }\n    \n    state.supplement_g = suppGrams;\n    state.protein_target = state.original_protein - suppGrams;\n    \n    // Now show distribution options\n    const target = state.protein_target;\n    const distributions = [\n      { label: 'Equal', icon: '⚖️', values: calcDistribution(target, 'Equal') },\n      { label: 'Heavy Breakfast', icon: '🌅', values: calcDistribution(target, 'Heavy Breakfast') },\n      { label: 'Heavy Lunch', icon: '☀️', values: calcDistribution(target, 'Heavy Lunch') },\n      { label: 'Heavy Dinner', icon: '🌙', values: calcDistribution(target, 'Heavy Dinner') },\n    ];\n    \n    state.sub_step = 'awaiting_distribution';\n    \n    response = makeResponse(\n      (suppGrams > 0 ? suppGrams + \"g from supplements deducted. \" : \"No supplements. \") +\n      \"Protein from food: \" + target + \"g. How would you like to distribute across \" + state.meals_per_day + \" meals?\",\n      'budget_setup',\n      {\n        protein_target: target,\n        supplement_g: state.supplement_g,\n        original_protein: state.original_protein,\n        meals_per_day: state.meals_per_day,\n        distributions: distributions\n      }\n    );\n  }\n  \n  else if (state.sub_step === 'awaiting_distribution') {\n    // User selected a distribution\n    let distLabel = null;\n    \n    if (selection.distribution) {\n      distLabel = selection.distribution;\n    } else {\n      const msg = userMessage;\n      if (msg.includes('equal')) distLabel = 'Equal';\n      else if (msg.includes('heavy breakfast') || msg.includes('breakfast')) distLabel = 'Heavy Breakfast';\n      else if (msg.includes('heavy lunch') || msg.includes('lunch')) distLabel = 'Heavy Lunch';\n      else if (msg.includes('heavy dinner') || msg.includes('dinner')) distLabel = 'Heavy Dinner';\n      else if (msg.includes('custom')) {\n        // Custom needs Claude to parse\n        needsClaude = true;\n        claudePrompt = 'The user wants a custom protein distribution. Their message: \"' + webhook.message + '\". Their protein target from food is ' + state.protein_target + 'g across ' + state.meals_per_day + ' meals. Parse their desired distribution and respond ONLY with JSON: {\"breakfast\": number, \"lunch\": number, \"dinner\": number}. Numbers must sum to ' + state.protein_target + '.';\n        state.sub_step = 'awaiting_custom_distribution';\n      }\n      else {\n        // Default to equal if message looks like confirmation\n        if (msg.includes('yes') || msg.includes('confirm') || msg.includes('ok') || msg.includes('looks good')) {\n          distLabel = 'Equal';\n        } else {\n          distLabel = 'Equal'; // fallback\n        }\n      }\n    }\n    \n    if (distLabel && !needsClaude) {\n      state.distribution = calcDistribution(state.protein_target, distLabel);\n      state.distribution_label = distLabel;\n      \n      // Initialize meals\n      state.meals = [\n        { label: 'Breakfast', target_g: state.distribution.breakfast, sources: [], cuts: {}, products: [], confirmed: false },\n        { label: 'Lunch', target_g: state.distribution.lunch, sources: [], cuts: {}, products: [], confirmed: false },\n        { label: 'Dinner', target_g: state.distribution.dinner, sources: [], cuts: {}, products: [], confirmed: false }\n      ];\n      state.current_meal = 0;\n      state.step = 'meal_curation';\n      state.sub_step = 'source_select';\n      \n      const meal = state.meals[0];\n      \n      // Check for carried portions\n      const carried = state.carried_portions[meal.label.toLowerCase()] || [];\n      let carriedMsg = '';\n      let adjustedTarget = meal.target_g;\n      if (carried.length > 0) {\n        const carriedProtein = carried.reduce((s, c) => s + c.protein_g, 0);\n        adjustedTarget = Math.max(0, meal.target_g - carriedProtein);\n        carriedMsg = ' You have ' + Math.round(carriedProtein) + 'g protein carried over. Need ' + adjustedTarget + 'g more.';\n      }\n      \n      response = makeResponse(\n        state.distribution_label + \" distribution confirmed! \" + meal.label + \" target: \" + meal.target_g + \"g protein.\" + carriedMsg + \" Choose your protein sources:\",\n        'source_select',\n        {\n          meal_label: meal.label,\n          protein_target: adjustedTarget,\n          carried_portions: carried,\n          available_sources: [\n            { name: 'eggs', icon: '🥚' },\n            { name: 'chicken', icon: '🍗' },\n            { name: 'fish', icon: '🐟' },\n            { name: 'mutton', icon: '🍖' }\n          ]\n        }\n      );\n    }\n  }\n  \n  else if (state.sub_step === 'awaiting_custom_distribution') {\n    // Claude returned custom distribution\n    try {\n      const parsed = JSON.parse(webhook.message);\n      state.distribution = parsed;\n      state.distribution_label = 'Custom';\n      state.meals = [\n        { label: 'Breakfast', target_g: parsed.breakfast, sources: [], cuts: {}, products: [], confirmed: false },\n        { label: 'Lunch', target_g: parsed.lunch, sources: [], cuts: {}, products: [], confirmed: false },\n        { label: 'Dinner', target_g: parsed.dinner, sources: [], cuts: {}, products: [], confirmed: false }\n      ];\n      state.current_meal = 0;\n      state.step = 'meal_curation';\n      state.sub_step = 'source_select';\n      \n      response = makeResponse(\n        \"Custom distribution set! Breakfast: \" + parsed.breakfast + \"g, Lunch: \" + parsed.lunch + \"g, Dinner: \" + parsed.dinner + \"g. Choose protein sources for Breakfast:\",\n        'source_select',\n        {\n          meal_label: 'Breakfast',\n          protein_target: parsed.breakfast,\n          available_sources: [\n            { name: 'eggs', icon: '🥚' },\n            { name: 'chicken', icon: '🍗' },\n            { name: 'fish', icon: '🐟' },\n            { name: 'mutton', icon: '🍖' }\n          ]\n        }\n      );\n    } catch(e) {\n      // Parse failed, ask again\n      response = makeResponse(\"I couldn't understand that distribution. Please choose: Equal, Heavy Breakfast, Heavy Lunch, or Heavy Dinner.\", 'budget_setup', {\n        protein_target: state.protein_target,\n        supplement_g: state.supplement_g,\n        original_protein: state.original_protein,\n        meals_per_day: state.meals_per_day,\n        distributions: [\n          { label: 'Equal', icon: '⚖️', values: calcDistribution(state.protein_target, 'Equal') },\n          { label: 'Heavy Breakfast', icon: '🌅', values: calcDistribution(state.protein_target, 'Heavy Breakfast') },\n          { label: 'Heavy Lunch', icon: '☀️', values: calcDistribution(state.protein_target, 'Heavy Lunch') },\n          { label: 'Heavy Dinner', icon: '🌙', values: calcDistribution(state.protein_target, 'Heavy Dinner') },\n        ]\n      });\n    }\n  }\n}\n\n// ============================================================\n// STEP: meal_curation\n// ============================================================\nelse if (state.step === 'meal_curation') {\n  const meal = state.meals[state.current_meal];\n  const mealKey = meal.label.toLowerCase();\n  \n  // Calculate effective target considering carried portions\n  const carried = state.carried_portions[mealKey] || [];\n  const carriedProtein = carried.reduce((s, c) => s + c.protein_g, 0);\n  const effectiveTarget = Math.max(0, meal.target_g - carriedProtein);\n  \n  // ---- SOURCE SELECT ----\n  if (state.sub_step === 'source_select') {\n    let sources = [];\n    \n    if (selection.sources && Array.isArray(selection.sources)) {\n      sources = selection.sources;\n    } else {\n      // Parse from text\n      const msg = userMessage;\n      if (msg.includes('egg')) sources.push('eggs');\n      if (msg.includes('chicken')) sources.push('chicken');\n      if (msg.includes('fish')) sources.push('fish');\n      if (msg.includes('mutton') || msg.includes('lamb') || msg.includes('goat')) sources.push('mutton');\n    }\n    \n    if (sources.length === 0) {\n      response = makeResponse(\n        \"Please select at least one protein source for \" + meal.label + \":\",\n        'source_select',\n        {\n          meal_label: meal.label,\n          protein_target: effectiveTarget,\n          carried_portions: carried,\n          available_sources: [\n            { name: 'eggs', icon: '🥚' },\n            { name: 'chicken', icon: '🍗' },\n            { name: 'fish', icon: '🐟' },\n            { name: 'mutton', icon: '🍖' }\n          ]\n        }\n      );\n    } else {\n      meal.sources = sources.slice(0, 3); // Max 3\n      \n      // Check which sources need cut selection\n      const needsCut = meal.sources.filter(s => s !== 'eggs');\n      \n      if (needsCut.length > 0) {\n        // Need to ask cut type for first non-egg source\n        state.sub_step = 'cut_select';\n        state._pending_cuts = needsCut;\n        state._current_cut_source = 0;\n        \n        const firstSource = needsCut[0];\n        const cuts = getCutTypes(firstSource);\n        \n        response = makeResponse(\n          \"Great! What type of \" + firstSource + \" do you prefer?\",\n          'cut_select',\n          { category: firstSource, cuts: cuts }\n        );\n      } else {\n        // Only eggs selected - skip to product select\n        state.sub_step = 'product_select';\n        const eggProducts = getProductsByCategory('eggs').slice(0, 4);\n        \n        response = makeResponse(\n          \"Choose your eggs product for \" + meal.label + \":\",\n          'product_select',\n          {\n            meal_label: meal.label,\n            protein_target: effectiveTarget,\n            products: eggProducts.map(p => ({\n              product_name: p.product_name,\n              pack_size_label: p.pack_size_label,\n              price: p.price,\n              protein_per_100g: p.protein_per_100g,\n              protein_per_pack: p.protein_per_pack,\n              image_url: p.image_url || '',\n              category: p.category\n            }))\n          }\n        );\n      }\n    }\n  }\n  \n  // ---- CUT SELECT ----\n  else if (state.sub_step === 'cut_select') {\n    const pendingCuts = state._pending_cuts || [];\n    const currentIdx = state._current_cut_source || 0;\n    const currentSource = pendingCuts[currentIdx];\n    \n    let selectedCut = null;\n    if (selection.cut) {\n      selectedCut = selection.cut;\n    } else {\n      // Parse from text - match against known cuts\n      const cuts = getCutTypes(currentSource);\n      for (const cut of cuts) {\n        if (userMessage.includes(cut.toLowerCase())) {\n          selectedCut = cut;\n          break;\n        }\n      }\n      // Fallback: take first word match\n      if (!selectedCut) {\n        if (userMessage.includes('boneless')) selectedCut = 'Boneless';\n        else if (userMessage.includes('curry')) selectedCut = 'Curry Cut';\n        else if (userMessage.includes('keema') || userMessage.includes('mince')) selectedCut = currentSource === 'chicken' ? 'Keema' : 'Mince';\n        else if (userMessage.includes('leg') || userMessage.includes('thigh')) selectedCut = 'Leg & Thigh';\n        else if (userMessage.includes('fillet')) selectedCut = 'Fillet';\n        else if (userMessage.includes('steak')) selectedCut = 'Steaks & Cut';\n        else if (userMessage.includes('whole')) selectedCut = 'Whole';\n        else if (userMessage.includes('prawn')) selectedCut = 'Others';\n        else if (userMessage.includes('mini')) selectedCut = 'Mini Pack';\n        else if (userMessage.includes('cube')) selectedCut = 'Boneless Cubes';\n      }\n    }\n    \n    if (!selectedCut) {\n      const cuts = getCutTypes(currentSource);\n      response = makeResponse(\n        \"Please select a cut type for \" + currentSource + \":\",\n        'cut_select',\n        { category: currentSource, cuts: cuts }\n      );\n    } else {\n      meal.cuts[currentSource] = selectedCut;\n      \n      // Check if more sources need cut selection\n      if (currentIdx + 1 < pendingCuts.length) {\n        state._current_cut_source = currentIdx + 1;\n        const nextSource = pendingCuts[currentIdx + 1];\n        const cuts = getCutTypes(nextSource);\n        response = makeResponse(\n          selectedCut + \" selected! Now what type of \" + nextSource + \"?\",\n          'cut_select',\n          { category: nextSource, cuts: cuts }\n        );\n      } else {\n        // All cuts selected - show products\n        state.sub_step = 'product_select';\n        \n        // Gather products per source (up to 4 per source, not per meal)\n        let allProducts = [];\n        const productsBySource = {};\n        for (const src of meal.sources) {\n          if (src === 'eggs') {\n            const eggProds = getProductsByCategory('eggs').slice(0, 4);\n            allProducts = allProducts.concat(eggProds);\n            productsBySource[src] = eggProds.map(p => p.product_name);\n          } else {\n            const cut = meal.cuts[src];\n            let cutProds = [];\n            \n            // Filter by exact cut_type match\n            if (cut) {\n              cutProds = getProductsByCut(src, cut);\n            }\n            \n            // Only if ZERO products match the cut, fall back to all products in category\n            if (cutProds.length === 0) {\n              cutProds = getProductsByCategory(src);\n            }\n            \n            const sliced = cutProds.slice(0, 4);\n            allProducts = allProducts.concat(sliced);\n            productsBySource[src] = sliced.map(p => p.product_name);\n          }\n        }\n        \n        response = makeResponse(\n          \"Choose 1 product per source for \" + meal.label + \". Pick from each category below:\",\n          'product_select',\n          {\n            meal_label: meal.label,\n            protein_target: effectiveTarget,\n            sources_selected: meal.sources,\n            products_by_source: productsBySource,\n            products: allProducts.map(p => ({\n              product_name: p.product_name,\n              pack_size_label: p.pack_size_label,\n              price: p.price,\n              protein_per_100g: p.protein_per_100g,\n              protein_per_pack: p.protein_per_pack,\n              image_url: p.image_url || '',\n              category: p.category,\n              cut_type: p.cut_type || ''\n            }))\n          }\n        );\n      }\n    }\n  }\n  \n  // ---- PRODUCT SELECT ----\n  else if (state.sub_step === 'product_select') {\n    let selectedProducts = [];\n    \n    if (selection.products && Array.isArray(selection.products)) {\n      selectedProducts = selection.products.map(name => findProduct(name)).filter(Boolean);\n    } else {\n      // Parse product names from text\n      for (const p of products) {\n        if (userMessage.includes(p.product_name.toLowerCase())) {\n          selectedProducts.push(p);\n        }\n      }\n    }\n    \n    if (selectedProducts.length === 0) {\n      // Show products again\n      let allProducts = [];\n      for (const src of meal.sources) {\n        if (src === 'eggs') {\n          allProducts = allProducts.concat(getProductsByCategory('eggs').slice(0, 3));\n        } else {\n          const cut = meal.cuts[src];\n          let cutProds = cut ? getProductsByCut(src, cut) : getProductsByCategory(src);\n          allProducts = allProducts.concat(cutProds.slice(0, 4));\n        }\n      }\n      response = makeResponse(\n        \"Please select products for \" + meal.label + \":\",\n        'product_select',\n        {\n          meal_label: meal.label,\n          protein_target: effectiveTarget,\n          products: allProducts.map(p => ({\n            product_name: p.product_name,\n            pack_size_label: p.pack_size_label,\n            price: p.price,\n            protein_per_100g: p.protein_per_100g,\n            protein_per_pack: p.protein_per_pack,\n            image_url: p.image_url || '',\n            category: p.category\n          }))\n        }\n      );\n    } else {\n      // Limit to 1 per source category\n      const byCategory = {};\n      for (const p of selectedProducts) {\n        const cat = (p.category || '').toLowerCase();\n        if (!byCategory[cat]) byCategory[cat] = p;\n      }\n      selectedProducts = Object.values(byCategory);\n      \n      // Calculate portions - split protein equally across sources\n      const proteinPerSource = effectiveTarget / selectedProducts.length;\n      const portions = [];\n      const utilOpts = [];\n      let totalProtein = 0;\n      let totalPrice = 0;\n      \n      for (const prod of selectedProducts) {\n        const portion = calcPortionForProduct(prod, proteinPerSource);\n        totalProtein += portion.protein_g;\n        totalPrice += portion.pack_price;\n        \n        const cat = (prod.category || '').toLowerCase();\n        const isLastMeal = state.current_meal >= (state.meals_per_day - 1);\n        const util = buildUtilizationOptions(prod, portion, isLastMeal);\n        \n        portions.push({\n          product_name: prod.product_name,\n          category: prod.category,\n          quantity: cat === 'eggs' ? portion.quantity + ' eggs' : portion.portion_grams + 'g',\n          protein_g: portion.protein_g,\n          pack_info: prod.pack_size_label + ' @ ₹' + prod.price,\n          remaining: util.remaining,\n          image_url: prod.image_url || '',\n          _portion_data: portion\n        });\n        \n        if (util.options.length > 0) {\n          utilOpts.push({\n            product_name: prod.product_name,\n            remaining: util.remaining,\n            remaining_amount: util.remaining_amount,\n            options: util.options\n          });\n        }\n      }\n      \n      // Auto-adjust if within ±10g\n      if (Math.abs(totalProtein - effectiveTarget) <= 10 && Math.abs(totalProtein - effectiveTarget) > 0.5) {\n        // Adjust the largest portion\n        const diff = effectiveTarget - totalProtein;\n        if (portions.length > 0) {\n          // Just note the adjustment in message\n        }\n      }\n      \n      // Store products in meal state\n      meal.products = portions.map(p => ({\n        product_name: p.product_name,\n        category: p.category,\n        portion_grams: p._portion_data.portion_grams,\n        quantity: p._portion_data.quantity,\n        unit: p._portion_data.unit,\n        protein_g: p.protein_g,\n        pack_size: p._portion_data.pack_size,\n        pack_price: p._portion_data.pack_price,\n        image_url: p.image_url\n      }));\n      \n      state.sub_step = 'portion_confirm';\n      \n      // Clean up _portion_data before sending to frontend\n      const cleanPortions = portions.map(p => {\n        const { _portion_data, ...clean } = p;\n        return clean;\n      });\n      \n      response = makeResponse(\n        meal.label + \" portions calculated! Total: \" + Math.round(totalProtein * 10) / 10 + \"g protein (target: \" + effectiveTarget + \"g). How would you like to use remaining product?\",\n        'portion_confirm',\n        {\n          meal_label: meal.label,\n          protein_target: effectiveTarget,\n          portions: cleanPortions,\n          total_protein: Math.round(totalProtein * 10) / 10,\n          price: totalPrice,\n          utilization_options: utilOpts\n        }\n      );\n    }\n  }\n  \n  // ---- PORTION CONFIRM (utilization) ----\n  else if (state.sub_step === 'portion_confirm') {\n    // Parse utilization choices\n    let utilChoices = {};\n    \n    if (selection.utilization && typeof selection.utilization === 'object') {\n      utilChoices = selection.utilization;\n    } else {\n      // Parse from text\n      const msg = userMessage;\n      if (msg.includes('same meal') || msg.includes('multi day') || msg.includes('next day') || msg.includes('option 1') || msg.includes('1')) {\n        // Default all to same_meal_multi_day\n        for (const p of meal.products) {\n          utilChoices[p.product_name] = 'same_meal_multi_day';\n        }\n      } else if (msg.includes('different meal') || msg.includes('other meal') || msg.includes('option 2') || msg.includes('2')) {\n        for (const p of meal.products) {\n          utilChoices[p.product_name] = 'other_meal';\n        }\n      } else if (msg.includes('confirm') || msg.includes('yes') || msg.includes('ok') || msg.includes('looks good')) {\n        // Default to same_meal_multi_day\n        for (const p of meal.products) {\n          utilChoices[p.product_name] = 'same_meal_multi_day';\n        }\n      }\n    }\n    \n    // Apply utilization choices\n    for (const prod of meal.products) {\n      const choice = utilChoices[prod.product_name] || 'same_meal_multi_day';\n      prod.pack_utilization = choice;\n      \n      const cat = (prod.category || '').toLowerCase();\n      const remaining = cat === 'eggs' ? \n        (prod.pack_size - prod.quantity) :\n        (prod.pack_size - prod.portion_grams);\n      \n      if (choice === 'same_meal_multi_day') {\n        const perDay = cat === 'eggs' ? prod.quantity : prod.portion_grams;\n        prod.days_covered = perDay > 0 ? Math.floor(prod.pack_size / perDay) : 1;\n      } else if (choice === 'other_meal') {\n        prod.days_covered = 1;\n        // Calculate protein from remaining and carry to next meal\n        const per100 = (findProduct(prod.product_name) || {}).protein_per_100g || 20;\n        let carriedProtein;\n        if (cat === 'eggs') {\n          carriedProtein = remaining * 6.5;\n        } else {\n          carriedProtein = Math.round((remaining * per100 / 100) * 10) / 10;\n        }\n        \n        // Determine which meal to carry to\n        const nextMealIdx = state.current_meal + 1;\n        if (nextMealIdx < 3) {\n          const nextMealKey = mealLabels[nextMealIdx].toLowerCase();\n          if (!state.carried_portions[nextMealKey]) state.carried_portions[nextMealKey] = [];\n          state.carried_portions[nextMealKey].push({\n            product_name: prod.product_name,\n            grams: remaining,\n            protein_g: carriedProtein\n          });\n        }\n      }\n    }\n    \n    // Calculate running price (per-day cost based on pack utilization)\n    let mealPrice = 0;\n    for (const p of meal.products) {\n      const days = p.days_covered || 1;\n      // Daily cost = pack price / days the pack covers\n      mealPrice += Math.round(p.pack_price / days);\n    }\n    state.running_price += mealPrice;\n    \n    // Confirm meal\n    meal.confirmed = true;\n    state.sub_step = 'meal_confirmed';\n    \n    response = makeResponse(\n      meal.label + \" locked! Daily cost so far: ₹\" + state.running_price,\n      'meal_confirmed',\n      {\n        meal_label: meal.label,\n        total_protein: Math.round(meal.products.reduce((s, p) => s + p.protein_g, 0) * 10) / 10,\n        running_price_daily: state.running_price,\n        running_price_weekly: state.running_price * 7,\n        products: meal.products.map(p => p.product_name),\n        days_covered: meal.products.map(p => ({ product_name: p.product_name, days: p.days_covered || 1 }))\n      }\n    );\n    \n    // Move to next meal or consolidation\n    if (state.current_meal < state.meals_per_day - 1) {\n      state.current_meal += 1;\n      state.sub_step = 'source_select';\n      \n      const nextMeal = state.meals[state.current_meal];\n      const nextCarried = state.carried_portions[nextMeal.label.toLowerCase()] || [];\n      const nextCarriedProtein = nextCarried.reduce((s, c) => s + c.protein_g, 0);\n      const nextEffective = Math.max(0, nextMeal.target_g - nextCarriedProtein);\n      \n      let carriedMsg = '';\n      if (nextCarried.length > 0) {\n        carriedMsg = ' You have ' + Math.round(nextCarriedProtein) + 'g carried over from leftover packs.';\n        if (nextEffective <= 0) {\n          carriedMsg += ' Your ' + nextMeal.label + ' protein is already covered!';\n        } else {\n          carriedMsg += ' Need ' + nextEffective + 'g more.';\n        }\n      }\n      \n      // Append next meal prompt to response\n      response.message += \" Moving to \" + nextMeal.label + \" (\" + nextMeal.target_g + \"g target).\" + carriedMsg;\n      \n      if (nextEffective <= 0) {\n        // Meal is covered by carried portions\n        nextMeal.confirmed = true;\n        nextMeal.products = nextCarried.map(c => ({\n          product_name: c.product_name,\n          protein_g: c.protein_g,\n          portion_grams: c.grams,\n          pack_price: 0,\n          pack_utilization: 'carried_over'\n        }));\n        \n        // Check if all meals done\n        if (state.current_meal >= state.meals_per_day - 1 || state.meals.every(m => m.confirmed)) {\n          state.step = 'consolidation';\n          state.sub_step = 'show';\n        } else {\n          state.current_meal += 1;\n        }\n      } else {\n        // Show source select for next meal\n        response.ui_type = 'source_select';\n        response.ui_data = {\n          meal_label: nextMeal.label,\n          protein_target: nextEffective,\n          carried_portions: nextCarried,\n          available_sources: [\n            { name: 'eggs', icon: '🥚' },\n            { name: 'chicken', icon: '🍗' },\n            { name: 'fish', icon: '🐟' },\n            { name: 'mutton', icon: '🍖' }\n          ]\n        };\n      }\n    } else {\n      // All meals done - build consolidation response directly\n      state.step = 'consolidation';\n      state.sub_step = 'awaiting_confirm';\n      \n      // Build consolidation data inline\n      const productUsage = {};\n      for (const m of state.meals) {\n        for (const p of m.products) {\n          if (!productUsage[p.product_name]) productUsage[p.product_name] = { meals: [], totalGrams: 0, category: p.category };\n          productUsage[p.product_name].meals.push(m.label);\n          productUsage[p.product_name].totalGrams += (p.portion_grams || 0);\n        }\n      }\n      \n      const consolSuggestions = [];\n      for (const [pname, usage] of Object.entries(productUsage)) {\n        if (usage.meals.length >= 2) {\n          const prod = findProduct(pname);\n          if (prod) {\n            const sameCategory = products.filter(p2 => \n              (p2.category || '').toLowerCase() === (usage.category || '').toLowerCase() &&\n              p2.pack_size_grams > prod.pack_size_grams\n            );\n            for (const bigger of sameCategory) {\n              const currentPerGram = prod.price / prod.pack_size_grams;\n              const biggerPerGram = bigger.price / bigger.pack_size_grams;\n              if (biggerPerGram < currentPerGram && bigger.pack_size_grams >= usage.totalGrams) {\n                const savings = Math.round((prod.price * usage.meals.length) - bigger.price);\n                if (savings > 0) {\n                  consolSuggestions.push({\n                    description: 'Switch ' + pname + ' to ' + bigger.product_name + ' (' + bigger.pack_size_label + ')',\n                    savings: savings\n                  });\n                }\n              }\n            }\n          }\n        }\n      }\n      \n      // Override response with consolidation\n      response = makeResponse(\n        meal.label + \" locked! All meals planned. Daily cost: ~₹\" + state.running_price + \" | Weekly estimate: ~₹\" + (state.running_price * 7),\n        'consolidation',\n        {\n          suggestions: consolSuggestions,\n          total_daily_price: state.running_price,\n          total_weekly_price: state.running_price * 7,\n          meals_summary: state.meals.map(m => ({\n            label: m.label,\n            target_g: m.target_g,\n            actual_g: Math.round(m.products.reduce((s, p) => s + (p.protein_g || 0), 0) * 10) / 10,\n            products: m.products.map(p => p.product_name)\n          }))\n        }\n      );\n    }\n  }\n  \n  // ---- MEAL CONFIRMED (transition step) ----\n  else if (state.sub_step === 'meal_confirmed') {\n    // User acknowledged, move forward\n    if (state.current_meal < state.meals_per_day - 1) {\n      state.current_meal += 1;\n      state.sub_step = 'source_select';\n      const meal2 = state.meals[state.current_meal];\n      const carried2 = state.carried_portions[meal2.label.toLowerCase()] || [];\n      const carriedP2 = carried2.reduce((s, c) => s + c.protein_g, 0);\n      const effective2 = Math.max(0, meal2.target_g - carriedP2);\n      \n      response = makeResponse(\n        \"Let's plan \" + meal2.label + \"! Target: \" + meal2.target_g + \"g\" + (carriedP2 > 0 ? \" (\" + Math.round(carriedP2) + \"g carried, need \" + effective2 + \"g)\" : \"\") + \". Choose sources:\",\n        'source_select',\n        {\n          meal_label: meal2.label,\n          protein_target: effective2,\n          carried_portions: carried2,\n          available_sources: [\n            { name: 'eggs', icon: '🥚' },\n            { name: 'chicken', icon: '🍗' },\n            { name: 'fish', icon: '🐟' },\n            { name: 'mutton', icon: '🍖' }\n          ]\n        }\n      );\n    } else {\n      state.step = 'consolidation';\n      state.sub_step = 'show';\n    }\n  }\n}\n\n// ============================================================\n// STEP: consolidation\n// ============================================================\nelse if (state.step === 'consolidation') {\n  if (state.sub_step === 'show') {\n    // Check for consolidation opportunities\n    const productUsage = {};\n    for (const meal of state.meals) {\n      for (const p of meal.products) {\n        if (!productUsage[p.product_name]) productUsage[p.product_name] = { meals: [], totalGrams: 0, category: p.category };\n        productUsage[p.product_name].meals.push(meal.label);\n        productUsage[p.product_name].totalGrams += (p.portion_grams || 0);\n      }\n    }\n    \n    const suggestions = [];\n    for (const [name, usage] of Object.entries(productUsage)) {\n      if (usage.meals.length >= 2) {\n        const prod = findProduct(name);\n        if (prod) {\n          // Check if a larger pack exists that could be cheaper per gram\n          const sameCategory = products.filter(p => \n            (p.category || '').toLowerCase() === (usage.category || '').toLowerCase() &&\n            p.pack_size_grams > prod.pack_size_grams\n          );\n          for (const bigger of sameCategory) {\n            const currentPerGram = prod.price / prod.pack_size_grams;\n            const biggerPerGram = bigger.price / bigger.pack_size_grams;\n            if (biggerPerGram < currentPerGram && bigger.pack_size_grams >= usage.totalGrams) {\n              const savings = Math.round((prod.price * usage.meals.length) - bigger.price);\n              if (savings > 0) {\n                suggestions.push({\n                  description: 'Switch ' + name + ' to ' + bigger.product_name + ' (' + bigger.pack_size_label + ') - covers ' + usage.meals.join(' + '),\n                  savings: savings,\n                  from: name,\n                  to: bigger.product_name\n                });\n              }\n            }\n          }\n        }\n      }\n    }\n    \n    state.sub_step = 'awaiting_confirm';\n    \n    if (suggestions.length === 0) {\n      response = makeResponse(\n        \"All meals planned! No consolidation savings found. Daily cost: ~₹\" + state.running_price + \" | Weekly estimate: ~₹\" + (state.running_price * 7) + \". Ready to create your weekly plan and cart?\",\n        'consolidation',\n        {\n          suggestions: [],\n          total_daily_price: state.running_price,\n          total_weekly_price: state.running_price * 7,\n          meals_summary: state.meals.map(m => ({\n            label: m.label,\n            target_g: m.target_g,\n            actual_g: Math.round(m.products.reduce((s, p) => s + (p.protein_g || 0), 0) * 10) / 10,\n            products: m.products.map(p => p.product_name)\n          }))\n        }\n      );\n    } else {\n      const totalSavings = suggestions.reduce((s, sg) => s + sg.savings, 0);\n      response = makeResponse(\n        \"Found consolidation opportunities! You could save ₹\" + totalSavings + \". Apply these savings?\",\n        'consolidation',\n        {\n          suggestions: suggestions,\n          total_weekly_price: state.running_price,\n          potential_savings: totalSavings,\n          meals_summary: state.meals.map(m => ({\n            label: m.label,\n            target_g: m.target_g,\n            actual_g: Math.round(m.products.reduce((s, p) => s + (p.protein_g || 0), 0) * 10) / 10,\n            products: m.products.map(p => p.product_name)\n          }))\n        }\n      );\n    }\n  }\n  \n  else if (state.sub_step === 'awaiting_confirm') {\n    // User confirmed consolidation - build weekly plan\n    state.step = 'weekly_plan';\n    state.sub_step = 'build';\n    \n    // Build 7-day plan (group products under each meal)\n    const weeklyPlan = [];\n    for (let day = 1; day <= 7; day++) {\n      const dayMeals = [];\n      for (const meal of state.meals) {\n        const mealProducts = meal.products.map(prod => ({\n          product_name: prod.product_name,\n          quantity: (prod.unit === 'eggs') ? (prod.quantity + ' eggs') : (prod.portion_grams + 'g'),\n          protein_g: prod.protein_g || 0\n        }));\n        dayMeals.push({\n          meal_label: meal.label,\n          products: mealProducts,\n          total_protein_g: Math.round(mealProducts.reduce((s, p) => s + p.protein_g, 0) * 10) / 10\n        });\n      }\n      weeklyPlan.push({ day: day, meals: dayMeals });\n    }\n    \n    // Build cart - calculate packs needed for 7 days\n    const cartMap = {};\n    for (const meal of state.meals) {\n      for (const prod of meal.products) {\n        const fullProd = findProduct(prod.product_name);\n        if (!fullProd) continue;\n        \n        const cat = (prod.category || (fullProd.category || '')).toLowerCase();\n        const daysCovered = prod.days_covered || 1;\n        \n        let packsNeeded;\n        if (daysCovered > 1) {\n          // Pack lasts multiple days for this meal - how many packs for 7 days?\n          packsNeeded = Math.ceil(7 / daysCovered);\n        } else if (cat === 'eggs') {\n          // Eggs: quantity is egg count, pack_size is egg count\n          const labelMatch = (fullProd.pack_size_label || '').match(/(\\d+)/);\n          const eggCount = labelMatch ? parseInt(labelMatch[1]) : 6;\n          const dailyEggs = prod.quantity || 0;\n          const weeklyEggs = dailyEggs * 7;\n          packsNeeded = Math.ceil(weeklyEggs / eggCount);\n        } else {\n          // Meat/fish: use grams\n          const dailyGrams = prod.portion_grams || 0;\n          const weeklyGrams = dailyGrams * 7;\n          const packSize = fullProd.pack_size_grams || 450;\n          packsNeeded = Math.ceil(weeklyGrams / packSize);\n        }\n        \n        if (!cartMap[prod.product_name]) {\n          cartMap[prod.product_name] = {\n            product_name: prod.product_name,\n            pack_size_label: fullProd.pack_size_label,\n            packs_needed: packsNeeded,\n            price_per_pack: fullProd.price,\n            total_price: packsNeeded * fullProd.price,\n            product_page_url: fullProd.product_page_url || '',\n            image_url: fullProd.image_url || ''\n          };\n        } else {\n          // Product used in multiple meals - add packs needed\n          const existing = cartMap[prod.product_name];\n          existing.packs_needed += packsNeeded;\n          existing.total_price = existing.packs_needed * existing.price_per_pack;\n        }\n      }\n    }\n    \n    const cart = Object.values(cartMap);\n    const totalCartPrice = cart.reduce((s, c) => s + c.total_price, 0);\n    \n    state.weekly_plan = weeklyPlan;\n    state.cart = cart;\n    state.total_cart_price = totalCartPrice;\n    \n    // Also build a simple text summary for each day\n    const weeklyText = weeklyPlan.map(d => {\n      const dayMealsText = d.meals.map(m => {\n        const prodText = m.products.map(p => p.product_name + ' (' + p.quantity + ')').join(', ');\n        return m.meal_label + ': ' + prodText + ' [' + m.total_protein_g + 'g]';\n      }).join(' | ');\n      return 'Day ' + d.day + ': ' + dayMealsText;\n    });\n    \n    response = makeResponse(\n      \"Here's your weekly plan and shopping cart! Total: ₹\" + totalCartPrice + \" for 7 days. Confirm to place your order?\",\n      'weekly_summary',\n      {\n        weekly_plan: weeklyPlan,\n        weekly_text: weeklyText,\n        cart: cart,\n        total_cart_price: totalCartPrice,\n        daily_cost: state.running_price,\n        daily_protein: state.protein_target,\n        distribution: state.distribution\n      }\n    );\n    \n    state.sub_step = 'awaiting_cart_confirm';\n  }\n}\n\n// ============================================================\n// STEP: weekly_plan \n// ============================================================\nelse if (state.step === 'weekly_plan') {\n  if (state.sub_step === 'awaiting_cart_confirm') {\n    const msg = userMessage;\n    if (msg.includes('confirm') || msg.includes('yes') || msg.includes('ok') || msg.includes('place') || msg.includes('order')) {\n      // Ask for delivery preference\n      state.step = 'delivery';\n      state.sub_step = 'frequency';\n      \n      response = makeResponse(\n        \"Great! How often would you like delivery?\",\n        'delivery_frequency',\n        {\n          frequencies: [\n            { label: 'Daily (fresh every day)', value: 'daily' },\n            { label: 'Every 2 days', value: 'every_2_days' },\n            { label: 'Every 3 days', value: 'every_3_days' },\n            { label: 'Weekly (once a week)', value: 'weekly' }\n          ]\n        }\n      );\n    } else if (msg.includes('modify') || msg.includes('change') || msg.includes('edit')) {\n      // Go back to consolidation\n      state.step = 'consolidation';\n      state.sub_step = 'show';\n      response = makeResponse(\"What would you like to change?\", 'text_input', { prompt: \"Describe what you'd like to modify:\" });\n    } else {\n      response = makeResponse(\n        \"Your cart total is ₹\" + state.total_cart_price + \". Would you like to confirm or modify?\",\n        'weekly_summary',\n        {\n          weekly_plan: state.weekly_plan,\n          cart: state.cart,\n          total_cart_price: state.total_cart_price\n        }\n      );\n    }\n  }\n}\n\n// ============================================================\n// STEP: delivery\n// ============================================================\nelse if (state.step === 'delivery') {\n  if (state.sub_step === 'frequency') {\n    let freq = null;\n    if (selection.frequency) freq = selection.frequency;\n    else {\n      if (userMessage.includes('daily') || userMessage.includes('every day')) freq = 'daily';\n      else if (userMessage.includes('2') || userMessage.includes('two') || userMessage.includes('alternate')) freq = 'every_2_days';\n      else if (userMessage.includes('3') || userMessage.includes('three')) freq = 'every_3_days';\n      else if (userMessage.includes('week') || userMessage.includes('once')) freq = 'weekly';\n      else freq = null;\n    }\n    \n    if (!freq) {\n      response = makeResponse(\n        \"How often would you like delivery?\",\n        'delivery_frequency',\n        {\n          frequencies: [\n            { label: 'Daily (fresh every day)', value: 'daily' },\n            { label: 'Every 2 days', value: 'every_2_days' },\n            { label: 'Every 3 days', value: 'every_3_days' },\n            { label: 'Weekly (once a week)', value: 'weekly' }\n          ]\n        }\n      );\n    } else {\n      state.delivery_frequency = freq;\n      state.sub_step = 'time_slot';\n      \n      response = makeResponse(\n        \"Got it! What time slot works best?\",\n        'delivery_select',\n        {\n          time_slots: [\n            { label: 'Morning (7-9 AM)', value: 'morning' },\n            { label: 'Afternoon (12-2 PM)', value: 'afternoon' },\n            { label: 'Evening (5-7 PM)', value: 'evening' }\n          ]\n        }\n      );\n    }\n  }\n  \n  else if (state.sub_step === 'time_slot') {\n    let slot = null;\n    if (selection.time_slot) slot = selection.time_slot;\n    else {\n      if (userMessage.includes('morning')) slot = 'morning';\n      else if (userMessage.includes('afternoon')) slot = 'afternoon';\n      else if (userMessage.includes('evening')) slot = 'evening';\n      else slot = 'morning';\n    }\n    \n    state.delivery_slot = slot;\n    state.sub_step = 'confirm_order';\n    state.stage_complete = true;\n    \n    response = makeResponse(\n      \"Order confirmed! Delivery: \" + state.delivery_frequency + \", \" + slot + \". Your weekly protein plan is all set! 🎉\",\n      'order_confirmed',\n      {\n        delivery_slot: slot,\n        delivery_frequency: state.delivery_frequency,\n        cart: state.cart,\n        total_cart_price: state.total_cart_price,\n        weekly_plan: state.weekly_plan,\n        daily_cost: state.running_price\n      }\n    );\n  }\n}\n\n// ============================================================\n// FALLBACK\n// ============================================================\nif (!response && !needsClaude) {\n  response = makeResponse(\n    \"I'm not sure what you'd like to do. Let me show you where we are.\",\n    'text_input',\n    { prompt: 'What would you like to do?', current_state: state.step + '/' + state.sub_step }\n  );\n}\n\n// ============================================================\n// OUTPUT\n// ============================================================\nif (needsClaude) {\n  return {\n    needs_claude: true,\n    claude_prompt: claudePrompt,\n    state: state,\n    response: null\n  };\n} else {\n  return {\n    needs_claude: false,\n    response: response,\n    state: state,\n    raw_response: JSON.stringify(response)\n  };\n}"
+      },
+      "id": "0cae335f-a0ef-4978-aa17-5b65c625fc9c",
+      "name": "State Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "16f9a5e3-d806-445f-90ed-158cb6059823",
+              "leftValue": "={{ $json.needs_claude }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "fb36fd26-bc62-43ef-8700-de871bb09f15",
+      "name": "Needs Claude?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -208,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (function() {\n  var prompt = $json.claude_prompt;\n  return JSON.stringify({\n    \"model\": \"claude-sonnet-4-20250514\",\n    \"max_tokens\": 1024,\n    \"system\": \"You are a helper that parses user input for a meal planning app. Respond ONLY in valid JSON, no markdown, no code fences.\",\n    \"messages\": [{\"role\": \"user\", \"content\": prompt}]\n  });\n})() }}",
+        "options": {}
+      },
+      "id": "697c793c-b476-480e-8a9e-10d1d29c9369",
+      "name": "Call Claude NLP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "k7Iw1AJuQqWYJ4gi",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE sessions SET conversation_history = $1::jsonb, context = $2::jsonb WHERE session_id = $3",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify(($('Get User & Products').item.json.conversation_history || []).concat([{\"role\": \"user\", \"content\": $('Webhook').item.json.body.message}, {\"role\": \"assistant\", \"content\": JSON.stringify($('State Engine').item.json.response)}])) }},{{ JSON.stringify($('State Engine').item.json.state) }},{{ $('Webhook').item.json.body.session_id }}"
+        }
+      },
+      "id": "e161b785-eec9-469d-b48b-a4df35501821",
+      "name": "Update History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        224,
+        208
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ahyMD9Hc6Yh1MegV",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9657bcc3-0067-4a97-8a4b-05a11e7b1c9e",
+              "leftValue": "={{ $('State Engine').item.json.state.stage_complete }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "192b0b34-f476-4d05-891e-8f4905ff9a69",
+      "name": "Stage Complete?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        448,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('State Engine').item.json.response) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "9853ce0a-c4cc-44b7-a7f1-ee566b4f850c",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE sessions SET context = $1::jsonb, current_stage = 'checkout' WHERE session_id = $2",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify($('State Engine').item.json.state) }},{{ $('Webhook').item.json.body.session_id }}"
+        }
+      },
+      "id": "52e4d727-95d3-40c3-9d9e-4e44639b26a6",
+      "name": "Save Plan",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        672,
+        112
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "ahyMD9Hc6Yh1MegV",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('State Engine').item.json.response) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "c2b6b2f2-cfaf-491a-9e3c-8db55593451a",
+      "name": "Respond Complete",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        112
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get User & Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get User & Products": {
+      "main": [
+        [
+          {
+            "node": "State Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Engine": {
+      "main": [
+        [
+          {
+            "node": "Needs Claude?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Claude?": {
+      "main": [
+        [
+          {
+            "node": "Call Claude NLP",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Claude NLP": {
+      "main": [
+        [
+          {
+            "node": "Update History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update History": {
+      "main": [
+        [
+          {
+            "node": "Stage Complete?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stage Complete?": {
+      "main": [
+        [
+          {
+            "node": "Save Plan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Plan": {
+      "main": [
+        [
+          {
+            "node": "Respond Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "c15181bd-40e3-4dc0-a1b8-98acfe3cfbf8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "4ef7d734e8f178874e2ecc4a00415061e4abdc065ed099059f597b19dfc6d95e"
+  },
+  "id": "iaCDwNKCPpEIMxGcxBd59",
+  "tags": []
+}
