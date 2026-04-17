@@ -1,0 +1,132 @@
+# Licious AI Protein Meal Planner
+
+An AI-powered meal planning and pre-order assistant built for [Licious](https://www.licious.in/) — India's leading meat and seafood brand. The app 
+helps users plan their weekly protein intake based on personal health goals and auto-builds an optimised Licious cart.
+
+**Live App:** [meal-prep-guide-3.preview.emergentagent.com](https://meal-prep-guide-3.preview.emergentagent.com)
+
+---
+
+## What It Does
+
+1. **Onboards the user** — collects age, weight, height, goal (weight loss / gain / muscle), and protein preference (meat, chicken, eggs)
+2. **Calculates daily calorie and protein targets** — personalised to each user's body metrics and goal
+3. **Plans a weekly meal schedule** — distributes protein across meals with zero wastage
+4. **Builds a Licious cart** — selects the right product SKUs, pack sizes, and quantities based on the weekly plan
+
+---
+
+## Tech Stack
+
+| Layer | Tool |
+|---|---|
+| Frontend | React + Tailwind CSS (built on Emergent) |
+| Backend | Python (FastAPI) |
+| Workflow & AI | n8n + Claude API (Anthropic) |
+| Database | Supabase (PostgreSQL) |
+| Product Data | Scraped from Licious via Apify, stored in Supabase |
+
+---
+
+## Architecture
+
+```
+User (Web App)
+     │
+     ▼
+Frontend (React / Emergent)
+     │  Structured form inputs
+     ▼
+n8n Workflow — Meal Planner State Engine
+     │
+     ├── Calorie & macro calculator (deterministic logic)
+     ├── Meal distribution algorithm (coded rules)
+     ├── Claude API — handles edge cases & ambiguous inputs
+     └── Supabase — fetches Licious product catalogue
+          │
+          ▼
+     Weekly plan + cart output → Frontend
+```
+
+---
+
+## The Build Journey: From Multi-Agent to State Engine
+
+### V1 — Multi-Agent Architecture (did not work well)
+
+The first version used **3 handoff agents**:
+- **Agent 1** — Onboarding (chat-based Q&A)
+- **Agent 2** — Meal planner
+- **Agent 3** — Weekly cart builder
+
+**Why it failed:**
+
+**Unstructured user inputs broke the pipeline.** Users typed answers in a freeform chat — height in cm or inches, weight in kg or pounds, 
+abbreviations like "H" or "W". The agents couldn't normalise this reliably, causing inconsistent outputs and occasional hallucinations.
+
+**Agent handoffs lost context.** When Agent 1 passed user data to Agent 2, nuanced details (e.g. "I want no red meat this week") were dropped or 
+misinterpreted. Each agent would often revert to generic outputs rather than truly personalised ones.
+
+**Meal distribution was too complex for a general agent.** The core problem of meal planning is: given a protein target and a set of SKUs with 
+fixed pack sizes, how do you minimise wastage and cost while distributing across 7 days and 2-3 meals? Even with detailed instructions, 
+guardrails, and examples — the agent couldn't crack this consistently. It needed an algorithm, not a prompt.
+
+**Poor UX.** Chat interfaces require users to type everything. Response latency was high. The experience felt slow and unreliable.
+
+---
+
+### V2 — State Engine Architecture (current)
+
+**Key insight: most of the onboarding is deterministic. There is no need for an agent to control it.**
+
+Age, weight, height, gender, goal — these are fixed-input fields. An app form handles them better than a chatbot. So the redesign moved all 
+structured data collection into the frontend as a clean multi-step form. Claude is only called when the input is genuinely ambiguous or edge-case 
+(e.g. unusual dietary combinations).
+
+**The meal distribution problem was solved with a coded algorithm** — hard rules for portion sizes, pack selection, and leftover distribution. 
+This made the output reliable, fast, and cost-effective (far fewer tokens).
+
+**Results:**
+- Consistent, personalised outputs for every user
+- Significantly faster response time
+- Zero hallucinations on structured inputs
+- Much better UX — progressive disclosure, visual output
+
+---
+
+## What I Learned
+
+> The best AI systems know when *not* to use AI.
+
+Using an agent for deterministic tasks wastes tokens, adds latency, and introduces unpredictability. The right pattern is: **code what you can 
+predict, use AI only for what you can't.**
+
+This project also showed that multi-agent handoffs require careful state management — context doesn't automatically transfer. If you need an agent 
+to act on upstream data, you have to be explicit and structured about what gets passed.
+
+---
+
+## Repository Structure
+
+```
+n8n-workflows/
+└── Licious - Pre-order Planner/
+    └── Meal Planner State Engine v1.json   ← current production workflow
+```
+
+**Frontend + backend code:** [github.com/karanbabbar/licious-ai-meal-planner](https://github.com/karanbabbar/licious-ai-meal-planner)
+
+---
+
+## How to Import the n8n Workflow
+
+1. Download `Meal Planner State Engine v1.json`
+2. Open your n8n instance
+3. Click **"Import from file"** and select the JSON
+4. Add your credentials: Anthropic API key, Supabase URL + key
+5. Activate the workflow
+
+---
+
+*Built by [Karan Babbar](https://github.com/karanbabbar) — Growth PM & AI builder*
+
