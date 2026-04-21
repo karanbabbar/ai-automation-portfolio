@@ -1,6 +1,13 @@
 # 🤖 AI SDR — Autonomous LinkedIn Outreach System
 ### Built at [Superjoin AI](https://superjoin.ai) · December 2025
 
+![Status](https://img.shields.io/badge/Status-Live-brightgreen)
+![Stack](https://img.shields.io/badge/Stack-n8n%20%7C%20Apollo%20%7C%20HeyReach%20%7C%20Mixpanel-blue)
+![Cohorts](https://img.shields.io/badge/Cohorts-13-orange)
+![Reply Rate](https://img.shields.io/badge/LinkedIn%20Reply%20Rate-10--20%25-success)
+![Enrichment](https://img.shields.io/badge/Apollo%20Enrichment-~80%25-blueviolet)
+![Workflows](https://img.shields.io/badge/n8n%20Workflows-13-yellow)
+
 > An end-to-end GTM automation that identifies high-intent free-trial users, enriches them with professional data, and engages them on LinkedIn — fully autonomously. No human in the loop for identification, enrichment, or outreach.
 
 ---
