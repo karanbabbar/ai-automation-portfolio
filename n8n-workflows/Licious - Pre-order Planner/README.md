@@ -1,164 +1,292 @@
-# Licious AI Protein Meal Planner
+# Licious Meal Planner — n8n Workflow
 
-An AI-powered meal planning assistant built for [Licious](https://www.licious.in/) — India's leading meat and seafood brand. The app helps users plan their weekly protein intake based on personal health goals and generates an optimised Licious grocery list — built for zero wastage, cost efficiency, and minimal variety complexity.
+## What This Workflow Is
 
-**Live App:** [meal-prep-guide-3.preview.emergentagent.com](https://meal-prep-guide-3.preview.emergentagent.com)
+This is the entire backend of the Licious AI Protein Meal Planner. It is a single n8n workflow that replaced what was originally a 3-agent architecture. It handles all business logic, state management, algorithm execution, database reads and writes, and AI calls — with no traditional API server doing any of the heavy lifting.
 
----
-
-## What It Does
-
-1. **Onboards the user** — collects age, weight, height, goal (weight loss / gain / muscle), meals per day preference, and protein preference (meat, chicken, eggs)
-2. **Calculates daily calorie and protein targets** — personalised to each user's body metrics and goal
-3. **Plans a weekly meal schedule** — distributes protein across meals with zero wastage using a custom algorithm
-4. **Generates a Licious grocery list** — selects the right product SKUs, pack sizes, and quantities optimised for cost and portion efficiency
+The workflow runs at `POST /v2/meal-planning` and is called by the React frontend at each step of the user journey.
 
 ---
 
-## Tech Stack
+## The Core Architectural Decision
 
-| Layer | Tool |
-|---|---|
-| Frontend | React + Tailwind CSS (built on Emergent) |
-| Backend | Python (FastAPI) |
-| Workflow & AI | n8n + Claude API (Anthropic) |
-| Database | Supabase (PostgreSQL) |
-| Product Data | Scraped from Licious via Apify, stored in Supabase |
+Most AI-powered apps default to agents for everything. This workflow makes a deliberate opposite choice:
 
----
+> **Use deterministic code for everything predictable. Use Claude only for what genuinely requires language understanding.**
 
-## The Hard Problem: Meal Planning Is a Portion Optimisation Problem
+In practice, Claude is called in exactly one scenario in this entire workflow — when a user types a custom protein distribution in freeform text that needs to be parsed into numbers. Every other step runs as pure JavaScript logic inside n8n's Code node.
 
-Most meal planners stop at "here's your daily protein target." The real challenge is what comes after — how do you actually buy and distribute protein across a week with real pack sizes, real cuts, and real constraints?
-
-This is the core algorithm the planner solves:
-
-### Step 1: Protein Distribution Across Meals
-
-The planner first determines how protein should be distributed across the day based on the user's meal preference (3 or 4 meals). It doesn't split protein equally — it weights meals from heaviest to lightest, so a user eating 3 meals gets a different distribution than one eating 4.
-
-### Step 2: Source and Cut Selection
-
-Once distribution is set, the user selects which protein source goes in which meal — e.g. eggs for breakfast, chicken for lunch, meat for dinner. The planner restricts options to **4 SKUs per cut per protein source** to keep choices manageable and reduce analysis paralysis.
-
-### Step 3: Portion Utilisation — the Nuanced Part
-
-This is where the algorithm does its real work. The goal is to minimise waste and cost by buying in bulk and utilising portions efficiently:
-
-**Same-day distribution:** If a protein source appears in 2 or more meals in a day (e.g. eggs at breakfast and chicken at lunch), the planner presents the user with a choice of cut for each meal slot — keeping variety intentional, not accidental.
-
-**Cross-meal cut nudging:** If a user prefers chicken breast at lunch and chicken keema at dinner but doesn't want the same cut twice in a day, the planner nudges utilisation of the remaining portion the next day — rather than buying two separate smaller packs.
-
-**Bulk-first logic:** The algorithm always calculates the weekly volume required for each protein source first, then selects the largest pack size that covers it. Smaller packs are only used to top up the remainder.
-
-**Shortage handling:** If there is a shortage of 50g or more after pack selection, the planner automatically increases the preferred protein source to cover the gap — no user intervention needed.
-
-**Surplus handling:** If there is a surplus of 50g or more, the planner adjusts by increasing that meal's portion slightly and reducing other sources proportionally — keeping the daily and weekly protein macro on target.
-
-### Step 4: Weekly Extrapolation
-
-The first day's meal plan is extrapolated across the full week. The user can then make changes day by day, or chat with the planner to iterate — the agent applies the same rules above when making any adjustments.
-
-### Step 5: Grocery List Generation
-
-Since Licious has not published a public cart API, the planner outputs a structured grocery list — protein source, cut type, pack size, quantity, and estimated cost — that the user takes to the Licious website to order.
-
-The grocery list is optimised by the same rules: prioritise large portions, limit cut variety in sync with user preferences, and minimise cost while keeping macros accurate.
+This decision came from the failure of v1, where 3 agents handled the full flow. The agents hallucinated on structured inputs, broke on handoffs, and couldn't solve the portion optimisation problem reliably even with detailed prompts and guardrails.
 
 ---
 
-## Architecture
+## Workflow Nodes — What Each One Does
 
 ```
-User (Web App)
+Webhook (POST /v2/meal-planning)
      │
      ▼
-Frontend (React / Emergent)
-     │  Structured form inputs
+Get User & Products (Postgres)
+     │  Single query — joins users, sessions, products, stock_tracker
      ▼
-n8n Workflow — Meal Planner State Engine
+State Engine (JavaScript Code Node — ~800 lines)
+     │  All business logic lives here
+     ▼
+Needs Claude? (IF node)
      │
-     ├── Calorie & macro calculator (deterministic logic)
-     ├── Meal distribution algorithm (coded rules)
-     │     ├── Portion utilisation engine
-     │     ├── Shortage / surplus adjustment
-     │     └── Bulk-first pack selection
-     ├── Claude API — handles edge cases & ambiguous inputs
-     └── Supabase — fetches Licious product catalogue
-          │
-          ▼
-     Weekly plan + grocery list → Frontend
+     ├── YES → Call Claude NLP (HTTP Request to Anthropic API)
+     │              └── Returns parsed JSON back into flow
+     │
+     └── NO ──────────────────────────────────┐
+                                              ▼
+                                     Update History (Postgres)
+                                     Saves conversation + state
+                                              │
+                                              ▼
+                                     Stage Complete? (IF node)
+                                              │
+                              ┌───────────────┴──────────────┐
+                              YES                            NO
+                              │                              │
+                         Save Plan                       Respond
+                         (Postgres)                  (mid-flow JSON)
+                              │
+                         Respond Complete
+                         (final JSON)
 ```
 
 ---
 
-## The Build Journey: From Multi-Agent to State Engine
+## The State Engine — How It Works
 
-### V1 — Multi-Agent Architecture (did not work well)
+The State Engine is a single JavaScript Code node (~800 lines) that acts as a state machine. Every request from the frontend hits this node. It reads the current state from Supabase, determines what step the user is on, processes their input, runs the relevant logic, and returns the next UI state.
 
-The first version used **3 handoff agents**:
-- **Agent 1** — Onboarding (chat-based Q&A)
-- **Agent 2** — Meal planner
-- **Agent 3** — Weekly cart builder
+### State Object
+
+Each session carries a persistent state object stored in Supabase and passed into every execution:
+
+```javascript
+state = {
+  engine_version: 1,
+  step: 'budget_setup',        // current major step
+  sub_step: 'init',            // current sub-step within major step
+  supplement_g: 0,             // protein from supplements (deducted)
+  original_protein: 180,       // total daily protein target
+  protein_target: 180,         // food-only protein target
+  meals_per_day: 3,
+  distribution: null,          // { breakfast: 60, lunch: 60, dinner: 60 }
+  distribution_label: null,    // 'Equal' | 'Heavy Breakfast' etc.
+  meals: [],                   // meal objects with products, cuts, portions
+  current_meal: 0,
+  carried_portions: {},        // leftover protein carried to next meal
+  running_price: 0,            // daily cost accumulator
+  weekly_plan: null,
+  cart: null,
+  stage_complete: false
+}
+```
+
+### Steps the State Machine Walks Through
+
+**1. `budget_setup`**
+- Asks if user takes protein supplements
+- Deducts supplement grams from daily protein target
+- Presents 4 distribution options: Equal, Heavy Breakfast, Heavy Lunch, Heavy Dinner
+- If user types a custom split → flags `needs_claude: true` → Claude parses it into `{breakfast, lunch, dinner}` numbers
+
+**2. `meal_curation` (runs once per meal)**
+- `source_select` — user picks protein sources (eggs, chicken, fish, mutton). Max 3 sources per meal.
+- `cut_select` — for non-egg sources, user picks cut type (Boneless, Curry Cut, Keema etc.)
+- `product_select` — workflow queries Supabase for up to 4 SKUs per cut per source. User picks one per source.
+- `portion_confirm` — workflow calculates portion sizes, shows remaining pack after use, presents utilisation options
+
+**3. `consolidation`**
+- After all meals are planned, checks if any product appears in 2+ meals
+- If yes, checks if a larger pack of the same product exists that would be cheaper per gram and cover the combined volume
+- Surfaces savings opportunities to the user
+
+**4. `weekly_plan`**
+- Extrapolates day 1 meal plan across 7 days
+- Calculates total packs needed per product based on pack size and days covered per pack
+- Builds the cart object: product, pack size, quantity, price, product URL
+
+**5. `delivery`**
+- Collects delivery frequency preference (daily, every 2 days, every 3 days, weekly)
+- Collects time slot preference
+- Sets `stage_complete: true` → triggers Save Plan node
+
+---
+
+## The Portion Optimisation Algorithm
+
+This is the core of the planner. The algorithm runs inside the State Engine and solves the real meal planning problem: given a protein target, a set of products with fixed pack sizes, and a 7-day horizon — how do you buy and distribute protein with zero wastage and minimum cost?
+
+### Protein Distribution
+
+```javascript
+function calcDistribution(target, label) {
+  if (label === 'Equal') {
+    const base = Math.floor(target / 3);
+    return { breakfast: base, lunch: base, dinner: target - (base * 2) };
+  }
+  if (label === 'Heavy Breakfast') {
+    return { breakfast: Math.round(target * 0.4), 
+             lunch: Math.round(target * 0.3), 
+             dinner: target - ... };
+  }
+  // Heavy Lunch: 30/40/30, Heavy Dinner: 30/30/40
+}
+```
+
+### Portion Calculation
+
+For meat and fish — converts protein grams needed into weight, rounded to nearest 5g:
+```javascript
+let grams = roundTo5((proteinNeeded / protein_per_100g) * 100);
+if (grams < 50) grams = 50; // minimum portion floor
+```
+
+For eggs — calculates egg count at 6.5g protein per egg:
+```javascript
+const eggsNeeded = Math.ceil(proteinNeeded / 6.5);
+```
+
+### Pack Utilisation Logic
+
+After portion is calculated, the algorithm checks how much pack is left over:
+
+```javascript
+const remaining = pack_size_grams - portion_grams;
+
+// How many days does one pack cover at this portion size?
+const totalDays = Math.floor(pack_size / portion_grams);
+
+// Options presented to user:
+// 1. Same meal for N days (pack covers multiple days — no waste)
+// 2. Use remaining Xg for a different meal today (carry to next meal)
+// 3. Switch to smaller pack if one exists that still covers the portion
+```
+
+When a user chooses "use remaining for a different meal", the leftover protein is calculated and stored in `carried_portions` — injected into the next meal's effective target automatically.
+
+### Shortage and Surplus Handling
+
+If a product covers fewer days than needed:
+- Weekly grams required = daily portion × 7
+- Packs needed = `Math.ceil(weekly_grams / pack_size_grams)`
+
+If a product is used in multiple meals per day:
+```javascript
+// Pack usage is accumulated across meals, not double-counted
+if (cartMap[product_name]) {
+  existing.packs_needed += packsNeeded;
+  existing.total_price = existing.packs_needed * price_per_pack;
+}
+```
+
+### Consolidation Check
+
+```javascript
+// If same product appears in 2+ meals and a larger pack exists:
+const biggerPerGram = bigger.price / bigger.pack_size_grams;
+const currentPerGram = prod.price / prod.pack_size_grams;
+
+if (biggerPerGram < currentPerGram && bigger.pack_size_grams >= totalGrams) {
+  const savings = Math.round((prod.price * usage.meals.length) - bigger.price);
+  // Surface to user as a consolidation suggestion
+}
+```
+
+---
+
+## How Claude Is Used (and Why It Is Barely Used)
+
+Claude is called via HTTP Request node directly to `api.anthropic.com/v1/messages`. It is invoked only when `needs_claude: true` is set by the State Engine.
+
+**The only scenario where this happens:**
+A user types a custom protein distribution like "I want 50g at breakfast, 80g at lunch and 50g at dinner." The State Engine can't parse this reliably with regex, so it flags Claude to handle it.
+
+**Claude's prompt:**
+```
+Parse the user's desired distribution. Respond ONLY with JSON:
+{"breakfast": number, "lunch": number, "dinner": number}
+Numbers must sum to [protein_target].
+```
+
+**System prompt:**
+```
+You are a helper that parses user input for a meal planning app. 
+Respond ONLY in valid JSON, no markdown, no code fences.
+```
+
+Claude returns a clean JSON object. The State Engine picks it up on the next execution and continues the flow as normal.
+
+Everything else — supplement handling, distribution calculation, cut selection, product filtering, portion sizing, pack utilisation, consolidation, cart building — is pure JavaScript. No AI.
+
+---
+
+## How the Frontend Calls This Workflow
+
+The frontend sends a POST request to the webhook at each step:
+
+```json
+{
+  "session_id": "abc123",
+  "message": { "sources": ["chicken", "eggs"] }
+}
+```
+
+The `message` field can be a JSON object (structured UI selection) or a plain string (freeform text). The State Engine handles both — it tries to parse JSON first, falls back to text parsing.
+
+The workflow responds with:
+
+```json
+{
+  "message": "Great! What type of chicken do you prefer?",
+  "ui_type": "cut_select",
+  "ui_data": { "category": "chicken", "cuts": ["Boneless", "Curry Cut", "Keema", "Leg & Thigh"] },
+  "state": { ... },
+  "stage_complete": false
+}
+```
+
+The `ui_type` field tells the frontend which component to render. The frontend is entirely display-driven — it renders whatever the workflow tells it to render.
+
+---
+
+## What This Workflow Replaced
+
+**V1: 3 agents with handoffs**
+- Agent 1: Onboarding chatbot — collected user data via freeform chat
+- Agent 2: Meal planner — took onboarding output, generated a meal plan
+- Agent 3: Cart builder — took meal plan, built a Licious cart
 
 **Why it failed:**
+- Freeform chat produced unstructured inputs (height in cm or inches, weight in kg or lbs) that agents couldn't normalise reliably
+- Context was lost in handoffs between agents — Agent 2 and Agent 3 regularly produced generic outputs instead of personalised ones
+- The portion optimisation problem (bulk-first selection, wastage minimisation, cross-meal distribution) was too complex for an agent to solve consistently even with detailed instructions
+- Latency was high — every step required an LLM call
+- Token cost was high — all three agents ran on every interaction
 
-**Unstructured user inputs broke the pipeline.** Users typed answers in a freeform chat — height in cm or inches, weight in kg or pounds, abbreviations like "H" or "W". The agents couldn't normalise this reliably, causing inconsistent outputs and occasional hallucinations.
-
-**Agent handoffs lost context.** When Agent 1 passed user data to Agent 2, nuanced details were dropped or misinterpreted. Each agent would often revert to generic outputs rather than personalised ones.
-
-**The portion optimisation problem was too complex for a general agent.** Even with detailed instructions, guardrails, and examples — the agent couldn't consistently handle bulk-first selection, shortage/surplus logic, and cross-meal distribution simultaneously. It needed a deterministic algorithm, not a prompt.
-
-**Poor UX.** Freeform chat requires users to type everything. Response latency was high. Progressive disclosure was impossible — users had no sense of how many steps remained.
-
----
-
-### V2 — State Engine Architecture (current)
-
-**Key insight: most of the onboarding is deterministic. There is no need for an agent to control it.**
-
-Age, weight, height, gender, goal — these are fixed-input fields. A structured multi-step form handles them better, faster, and more reliably than a chatbot. Claude is only invoked when the input is genuinely ambiguous or edge-case.
-
-**The portion optimisation problem was solved with a coded algorithm** — hard rules for distribution weighting, pack selection, shortage/surplus adjustment, and cross-meal nudging. This made the output reliable, fast, and cost-efficient (significantly fewer tokens consumed).
-
-**Results:**
-- Consistent, personalised outputs for every user
-- Significantly faster response time
-- Zero hallucinations on structured inputs
-- Better UX — progressive disclosure, visual weekly plan output
+**V2 result:**
+- One workflow, one Code node with deterministic logic
+- Claude called in at most one edge case per session
+- Consistent outputs, lower latency, lower cost, no hallucinations on structured data
 
 ---
 
-## What I Learned
-
-> The best AI systems know when *not* to use AI.
-
-Using an agent for deterministic tasks wastes tokens, adds latency, and introduces unpredictability. The right pattern is: **code what you can predict, use AI only for what you genuinely can't.**
-
-The portion optimisation problem also taught me that agents are not good optimisers out of the box. If you need consistent rule-following across multiple interdependent constraints — write the rules in code, not in a prompt.
-
----
-
-## Repository Structure
-
-```
-n8n-workflows/
-└── Licious - Pre-order Planner/
-    └── Meal Planner State Engine v1.json   ← current production workflow
-```
-
-**Frontend + backend code:** [github.com/karanbabbar/licious-ai-meal-planner](https://github.com/karanbabbar/licious-ai-meal-planner)
-
----
-
-## How to Import the n8n Workflow
+## How to Import and Run
 
 1. Download `Meal Planner State Engine v1.json`
-2. Open your n8n instance
-3. Click **"Import from file"** and select the JSON
-4. Add your credentials: Anthropic API key, Supabase URL + key
-5. Activate the workflow
+2. Open your n8n instance → **Import from file**
+3. Add credentials:
+   - **Postgres**: your Supabase connection string
+   - **HTTP Header Auth**: Anthropic API key as `x-api-key`
+4. Set up Supabase tables: `users`, `sessions`, `products`, `stock_tracker`
+5. Populate `products` table with Licious catalogue data
+6. Activate the workflow
+7. Point your frontend at the webhook URL: `POST /v2/meal-planning`
 
 ---
 
-*Built by [Karan Babbar](https://github.com/karanbabbar) — Growth PM & AI builder*
+*Part of the [Licious AI Meal Planner](https://github.com/karanbabbar/licious-ai-meal-planner) — built by [Karan Babbar](https://github.com/karanbabbar)*
