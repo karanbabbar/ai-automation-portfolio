@@ -1,0 +1,2236 @@
+{
+  "name": "Linkedin outreach - [ Day3 cohort - all ACTIVEs till date ]",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// COHORT CONFIGURATION - Update these values for each automation\nconst COHORT_CONFIG = {\n  name: \"Day3 cohort - all ACTIVEs till date\",\n  cohortId: \"5822925\",\n  heyreachListId: 324814,\n  sheetTabName: \"Day3 cohort - all ACTIVEs till date\"\n};\n\nreturn [{json: COHORT_CONFIG}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "c0561a4a-3b15-4cc0-90e5-cf458e9da0aa",
+      "name": "Cohort Configuration"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://eu.mixpanel.com/api/query/engage?project_id=2974280",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Basic cmF2aS1uOG4uMTVjYjRkLm1wLXNlcnZpY2UtYWNjb3VudDpxdXhMOFVVT29rOEIwOE56OU9nQWZ3SkFxTjJma0dxYw=="
+            },
+            {
+              "name": "content-type",
+              "value": "application/x-www-form-urlencoded"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "filter_by_cohort",
+              "value": "={{ JSON.stringify({id: $json.cohortId}) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "6272ce7f-c4cb-4ffd-b01c-85e42852f985",
+      "name": "Mixpanel - Fetch Cohort Users"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse all Mixpanel users - NO FILTERING\nconst users = items[0].json.results || [];\nconst cohortConfig = $('Cohort Configuration').first().json;\n\nconst processed = users.map(user => {\n  let email = (user.properties && user.properties.$email) ? user.properties.$email : user.$distinct_id;\n  email = (email || '').toLowerCase().trim();\n  \n  const [namePart, companyPart] = email.split('@');\n  const firstName = namePart ? namePart.split(/[._]/)[0] : '';\n  const companyGuess = companyPart ? companyPart.split('.')[0] : '';\n  \n  return { \n    Email: email,\n    firstName: firstName,\n    companyGuess: companyGuess,\n    Mixpanel_ID: user.$distinct_id || email,\n    Current_Cohort_Name: cohortConfig.name,\n    Current_Cohort_ID: cohortConfig.cohortId,\n    heyreachListId: cohortConfig.heyreachListId,\n    cohortTabName: cohortConfig.sheetTabName,\n    Added_To_This_Cohort_Date: new Date().toISOString().split('T')[0]\n  };\n});\n\nreturn processed.map(user => ({ json: user }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "14396804-2a9a-467a-917b-ec8ba68e09ff",
+      "name": "Parse ALL Mixpanel Users"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        896,
+        0
+      ],
+      "id": "4d01dc84-4dbe-4449-bd3a-e4a979267f7b",
+      "name": "Rate Limit - Pre Lookup (2s)",
+      "webhookId": "b2df317f-8e2c-42a0-b983-09942d148942"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1BaqUuy7QOAdCGId-T0L8LSJdkWqz7ZLIopRgOBMsajo",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "All users in mixpanel cohorts",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Email",
+              "lookupValue": "={{ $json.Email }}"
+            }
+          ]
+        },
+        "combineFilters": "OR",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "cc53b62a-6724-411b-a0ea-6351a27ccb73",
+      "name": "Lookup in Master Sheet",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Y1Tsl7HZy6eWgvyc",
+          "name": "Google Sheets (karan.babbar@superjoin.ai)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Check if this user was previously enriched in Master Sheet\n// This node receives merged data from: Mixpanel Users + Master Sheet lookup\nconst item = $input.item.json;\n\n// Determine if user has Apollo enrichment data from Master Sheet\nconst hasApolloData = !!(\n  item.Apollo_Person_ID && \n  item.Apollo_Person_ID.trim() !== ''\n);\n\n// Determine if user exists in Master Sheet (has any Master Sheet fields)\nconst existsInMasterSheet = !!(\n  item.First_Seen_Cohort || \n  item.Enrichment_Date ||\n  item.Last_Updated\n);\n\n// Determine if already sent to HeyReach in a previous cohort\nconst alreadySentToHeyreach = (\n  item.HeyReach_Status === 'Sent' || \n  (item.HeyReach_Status && item.HeyReach_Status.includes('Already Sent'))\n);\n\n// Get previous cohort info if exists\nconst previousCohort = item.Last_Seen_Cohort || item.First_Seen_Cohort || '';\n\n// Build output with ALL necessary fields\nconst output = {\n  // ========== PRIMARY IDENTIFIERS ==========\n  Email: item.Email || '',\n  Mixpanel_ID: item.Mixpanel_ID || '',\n  \n  // ========== NAME & COMPANY ==========\n  First_Name: hasApolloData ? (item.First_Name || '') : (item.firstName || ''),\n  Last_Name: hasApolloData ? (item.Last_Name || '') : '',\n  Company_Name: hasApolloData ? (item.Company_Name || '') : (item.companyGuess || ''),\n  Company_Size: hasApolloData ? (item.Company_Size || 0) : 0,\n  \n  // ========== PROFESSIONAL INFO (from Apollo) ==========\n  LinkedIn_URL: hasApolloData ? (item.LinkedIn_URL || '') : '',\n  Title: hasApolloData ? (item.Title || '') : '',\n  Department: hasApolloData ? (item.Department || '') : '',\n  Location: hasApolloData ? (item.Location || '') : '',\n  Lead_Score: hasApolloData ? (item.Lead_Score || 0) : 0,\n  Persona_Category: hasApolloData ? (item.Persona_Category || 'Unknown') : 'Unknown',\n  Match_Confidence: hasApolloData ? (item.Match_Confidence || 0) : 0,\n  \n  // ========== APOLLO TRACKING ==========\n  Apollo_Person_ID: hasApolloData ? (item.Apollo_Person_ID || '') : '',\n  Source_Company_apolloOrgId: hasApolloData ? (item.Source_Company_apolloOrgId || '') : '',\n  Enrichment_Date: hasApolloData ? (item.Enrichment_Date || '') : '',\n  Enrichment_Status: hasApolloData ? 'Enriched' : 'Not Enriched',\n  \n  // ========== COHORT TRACKING ==========\n  First_Seen_Cohort: item.First_Seen_Cohort || item.Current_Cohort_Name || '',\n  First_Seen_Date: item.First_Seen_Date || item.Added_To_This_Cohort_Date || '',\n  Last_Seen_Cohort: item.Current_Cohort_Name || '',\n  Last_Seen_Date: item.Added_To_This_Cohort_Date || '',\n  Previous_Cohort: previousCohort,\n  \n  // ========== HEYREACH TRACKING ==========\n  HeyReach_Status: alreadySentToHeyreach \n    ? `Already Sent in '${previousCohort}' cohort` \n    : 'Pending',\n  First_HeyReach_List_ID: item.First_HeyReach_List_ID || '',\n  First_Sent_Date: item.First_Sent_Date || '',\n  Current_HeyReach_List_ID: item.heyreachListId || '',\n  \n  // ========== MIXPANEL DATA (from current cohort) ==========\n  Current_Cohort_Name: item.Current_Cohort_Name || '',\n  Current_Cohort_ID: item.Current_Cohort_ID || '',\n  Added_To_This_Cohort_Date: item.Added_To_This_Cohort_Date || '',\n  \n  // ========== METADATA ==========\n  Last_Updated: new Date().toISOString().split('T')[0],\n  \n  // ========== CONTROL FLAGS ==========\n  needsApolloEnrichment: !hasApolloData,  // TRUE if needs Apollo call\n  skipHeyreach: alreadySentToHeyreach,    // TRUE if already sent before\n  wasEnriched: hasApolloData,             // TRUE if has Apollo data\n  isNewUser: !existsInMasterSheet,        // TRUE if not in Master Sheet\n  \n  // ========== DATA FOR APOLLO CALL (if needed) ==========\n  firstName: item.firstName || item.First_Name || '',\n  companyGuess: item.companyGuess || item.Company_Name || '',\n  heyreachListId: item.heyreachListId || '',\n  cohortTabName: item.cohortTabName || item.Current_Cohort_Name || ''\n};\n\nreturn { json: output };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        64
+      ],
+      "id": "1e817600-36de-48cb-879b-3fd24cc7d53c",
+      "name": "Check Existing Enrichment Status"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "needs-apollo",
+              "leftValue": "={{ $json.needsApolloEnrichment }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1792,
+        64
+      ],
+      "id": "e5d50a19-6bdc-4289-8c13-815f09f6805c",
+      "name": "Needs Apollo Enrichment?"
+    },
+    {
+      "parameters": {
+        "amount": 3
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2016,
+        64
+      ],
+      "id": "ad1d54be-61f1-4421-bcd0-30b5a496b333",
+      "name": "Rate Limit - Apollo (3s)",
+      "webhookId": "155037db-fe4e-44f1-a6d8-c7fdb837e0b4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/v1/people/match",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "b6HrpYT4oTRXkbCJ8cU8nw"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"first_name\": \"{{ $json.firstName }}\",\n  \"email\": \"{{ $json.Email }}\",\n  \"organization_name\": \"{{ $json.companyGuess }}\",\n  \"reveal_personal_emails\": false,\n  \"reveal_phone_number\": false\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2240,
+        64
+      ],
+      "id": "49d41669-ef47-4b48-9723-37699b816f39",
+      "name": "Apollo - Person Match",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Apollo enrichment and score leads with ICP logic\nconst items = $input.all();\nconst results = [];\n\nitems.forEach(item => {\n  const itemData = item.json;\n  const apolloData = itemData.person || {};\n  \n  // Get email from correct location\n  const userEmail = itemData.email || itemData.Email || apolloData.email || '';\n  \n  // CRITICAL: Preserve Mixpanel_ID\n  const mixpanelId = itemData.Mixpanel_ID || itemData.mixpanelId || '';\n  \n  // ========== ICP SCORING LOGIC ==========\n  const title = (apolloData.title || '').toLowerCase();\n  const departments = (apolloData.departments || []).join(' ').toLowerCase();\n  const companySize = apolloData.organization?.estimated_num_employees || 0;\n  \n  let score = 1;\n  let persona = 'Unknown';\n  \n  // Score 5: RevOps/Marketing Ops\n  if (title.includes('revenue operations') || title.includes('revops') || title.includes('rev ops') ||\n      title.includes('marketing operations') || title.includes('marketing ops') || title.includes('mops')) {\n    score = 5;\n    persona = 'RevOps/Marketing Ops';\n  }\n  // Score 4: Data/Analytics\n  else if (title.includes('data analyst') || title.includes('analytics manager') ||\n           title.includes('business analyst') || title.includes('product analyst') ||\n           title.includes('data scientist') || departments.includes('analytics') || departments.includes('data')) {\n    score = 4;\n    persona = 'Data/Analytics';\n  }\n  // Score 4: Founders/Leadership in Small Companies\n  else if ((title.includes('founder') || title.includes('co-founder')) && companySize < 500) {\n    score = 4;\n    persona = 'Founder/Leadership';\n  }\n  else if (title.includes('ceo') && companySize < 100) {\n    score = 4;\n    persona = 'Founder/Leadership';\n  }\n  else if (title.includes('vp') && companySize < 50) {\n    score = 4;\n    persona = 'Founder/Leadership';\n  }\n  // Score 3: Business Operations\n  else if (title.includes('business operations') || title.includes('operations manager') ||\n           departments.includes('operations')) {\n    score = 3;\n    persona = 'Business Operations';\n  }\n  // Score 2: Adjacent Roles\n  else if (title.includes('manager') || title.includes('director') ||\n           title.includes('product') || title.includes('sales ops')) {\n    score = 2;\n    persona = 'Adjacent Role';\n  }\n  \n  // Build output - START WITH ALL ORIGINAL DATA, then override with Apollo data\n  const output = {\n    // ========== COPY ALL ORIGINAL FIELDS FIRST ==========\n    ...itemData,\n    \n    // ========== OVERRIDE WITH APOLLO DATA ==========\n    Email: userEmail,\n    Mixpanel_ID: mixpanelId,\n    First_Name: apolloData.first_name || itemData.First_Name || itemData.firstName || '',\n    Last_Name: apolloData.last_name || itemData.Last_Name || '',\n    Company_Name: apolloData.organization?.name || itemData.Company_Name || itemData.companyGuess || '',\n    Company_Size: companySize,\n    LinkedIn_URL: apolloData.linkedin_url || itemData.LinkedIn_URL || '',\n    Title: apolloData.title || '',\n    Department: (apolloData.departments || []).join(', '),\n    Location: apolloData.city ? `${apolloData.city}, ${apolloData.state || ''}` : '',\n    Lead_Score: score,\n    Persona_Category: persona,\n    Match_Confidence: apolloData.matched_confidence || 0,\n    Apollo_Person_ID: apolloData.id || '',\n    Source_Company_apolloOrgId: apolloData.organization?.id || '',\n    Enrichment_Date: new Date().toISOString().split('T')[0],\n    Enrichment_Status: 'Enriched',\n    Last_Updated: new Date().toISOString().split('T')[0],\n    needsApolloEnrichment: false,\n    wasEnriched: true\n  };\n  \n  // Remove the Apollo API response fields that shouldn't go to Google Sheets\n  delete output.person;\n  delete output.employment_history;\n  delete output.headline;\n  delete output.photo_url;\n  delete output.twitter_url;\n  delete output.github_url;\n  delete output.facebook_url;\n  delete output.extrapolated_email_confidence;\n  \n  results.push({ json: output });\n});\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2464,
+        64
+      ],
+      "id": "76eddd17-63a2-4d23-ad09-acecd3a23db6",
+      "name": "Process Apollo & Score ICP"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1BaqUuy7QOAdCGId-T0L8LSJdkWqz7ZLIopRgOBMsajo",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "All users in mixpanel cohorts",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "First_Name": "={{ $json.First_Name }}",
+            "Email": "={{ $json.Email  }}",
+            "Last_Name": "={{ $json.Last_Name }}",
+            "Company_Name": "={{ $json.Company_Name }}",
+            "Company_Size": "={{ $json.Company_Size }}",
+            "LinkedIn_URL": "={{ $json.LinkedIn_URL }}",
+            "Title": "={{ $json.Title }}",
+            "Department": "={{ $json.Department }}",
+            "Location": "={{ $json.Location }}",
+            "Lead_Score": "={{ $json.Lead_Score }}",
+            "Persona_Category": "={{ $json.Persona_Category }}",
+            "Apollo_Person_ID": "={{ $json.Apollo_Person_ID }}",
+            "Source_Company_apolloOrgId": "={{ $json.Source_Company_apolloOrgId }}",
+            "Enrichment_Date": "={{ $json.Enrichment_Date }}",
+            "First_Seen_Cohort": "={{ $json.First_Seen_Cohort }}",
+            "First_Seen_Date": "={{ $json.First_Seen_Date }}",
+            "Last_Seen_Cohort": "={{ $json.Last_Seen_Cohort }}",
+            "Last_Seen_Date": "={{ $json.Last_Seen_Date }}",
+            "HeyReach_Status": "={{ $json.HeyReach_Status }}",
+            "First_HeyReach_List_ID": "={{ $json.First_HeyReach_List_ID }}",
+            "First_Sent_Date": "={{ $json.First_Sent_Date }}",
+            "Last_Updated": "={{ $json.Last_Updated }}"
+          },
+          "matchingColumns": [
+            "Email"
+          ],
+          "schema": [
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_Name",
+              "displayName": "First_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Name",
+              "displayName": "Last_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company_Name",
+              "displayName": "Company_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company_Size",
+              "displayName": "Company_Size",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "LinkedIn_URL",
+              "displayName": "LinkedIn_URL",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Department",
+              "displayName": "Department",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lead_Score",
+              "displayName": "Lead_Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Persona_Category",
+              "displayName": "Persona_Category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Apollo_Person_ID",
+              "displayName": "Apollo_Person_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Source_Company_apolloOrgId",
+              "displayName": "Source_Company_apolloOrgId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Enrichment_Date",
+              "displayName": "Enrichment_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "First_Seen_Cohort",
+              "displayName": "First_Seen_Cohort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "First_Seen_Date",
+              "displayName": "First_Seen_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Seen_Cohort",
+              "displayName": "Last_Seen_Cohort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Seen_Date",
+              "displayName": "Last_Seen_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "HeyReach_Status",
+              "displayName": "HeyReach_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "First_HeyReach_List_ID",
+              "displayName": "First_HeyReach_List_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "First_Sent_Date",
+              "displayName": "First_Sent_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Updated",
+              "displayName": "Last_Updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mixpanel_ID",
+              "displayName": "Mixpanel_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Match_Confidence",
+              "displayName": "Match_Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Enrichment_Status",
+              "displayName": "Enrichment_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "needsApolloEnrichment",
+              "displayName": "needsApolloEnrichment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "wasEnriched",
+              "displayName": "wasEnriched",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2912,
+        0
+      ],
+      "id": "31782886-8840-470e-81c7-c34246ac560b",
+      "name": "Update Master Sheet (ALL USERS)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Y1Tsl7HZy6eWgvyc",
+          "name": "Google Sheets (karan.babbar@superjoin.ai)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1W64oxN1TzMXzSF0XAYwD-F3EjeQpDu2w-c92hQ-YTwc/edit?pli=1&gid=1829180786#gid=1829180786",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1942208328,
+          "mode": "list",
+          "cachedResultName": "Day3 cohort - all ACTIVEs till date",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1W64oxN1TzMXzSF0XAYwD-F3EjeQpDu2w-c92hQ-YTwc/edit#gid=1942208328"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Email"
+          ],
+          "schema": [
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_Name",
+              "displayName": "First_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Name",
+              "displayName": "Last_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company_Name",
+              "displayName": "Company_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company_Size",
+              "displayName": "Company_Size",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "LinkedIn_URL",
+              "displayName": "LinkedIn_URL",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Department",
+              "displayName": "Department",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lead_Score",
+              "displayName": "Lead_Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Persona_Category",
+              "displayName": "Persona_Category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Apollo_Person_ID",
+              "displayName": "Apollo_Person_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Source_Company_apolloOrgId",
+              "displayName": "Source_Company_apolloOrgId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mixpanel_ID",
+              "displayName": "Mixpanel_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Current_Cohort_Name",
+              "displayName": "Current_Cohort_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Current_Cohort_ID",
+              "displayName": "Current_Cohort_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "First_Seen_Cohort",
+              "displayName": "First_Seen_Cohort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Enrichment_Date",
+              "displayName": "Enrichment_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "HeyReach_Status",
+              "displayName": "HeyReach_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "HeyReach_List_ID",
+              "displayName": "HeyReach_List_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Already_Sent_Message",
+              "displayName": "Already_Sent_Message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Added_To_This_Cohort_Date",
+              "displayName": "Added_To_This_Cohort_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Updated",
+              "displayName": "Last_Updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Match_Confidence",
+              "displayName": "Match_Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Enrichment_Status",
+              "displayName": "Enrichment_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "needsApolloEnrichment",
+              "displayName": "needsApolloEnrichment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "wasEnriched",
+              "displayName": "wasEnriched",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "firstName",
+              "displayName": "firstName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "companyGuess",
+              "displayName": "companyGuess",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "heyreachListId",
+              "displayName": "heyreachListId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "cohortTabName",
+              "displayName": "cohortTabName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "hasLinkedIn",
+              "displayName": "hasLinkedIn",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "skipHeyreach",
+              "displayName": "skipHeyreach",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mixpanel_Cohort_ID",
+              "displayName": "Mixpanel_Cohort_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mixpanel_Cohort_Name",
+              "displayName": "Mixpanel_Cohort_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        3136,
+        0
+      ],
+      "id": "faa15919-8fb8-41c4-a60a-e82ca70118c1",
+      "name": "Update Cohort Tab (ALL USERS)",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Y1Tsl7HZy6eWgvyc",
+          "name": "Google Sheets (karan.babbar@superjoin.ai)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-linkedin",
+              "leftValue": "={{ $json.LinkedIn_URL }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3360,
+        112
+      ],
+      "id": "d9860310-44aa-40a6-9302-a8d9b3f29d85",
+      "name": "Qualify for HeyReach?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.heyreach.io/api/public/list/AddLeadsToListV2",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "z9UvtCToHQeNLG+2XwN9DB4G3fGDRi+MMe4S1liu4Js="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"leads\": [\n    {\n      \"firstName\": \"{{ $json.First_Name }}\",\n      \"lastName\": \"{{ $json.Last_Name }}\",\n      \"email\": \"{{ $json.Email }}\",\n      \"companyName\": \"{{ $json.Company_Name }}\",\n      \"profileUrl\": \"{{ $json.LinkedIn_URL }}\",\n      \"title\": \"{{ $json.Title }}\",\n      \"customFields\": {\n        \"persona\": \"{{ $json.Persona_Category }}\",\n        \"leadScore\": \"{{ $json.Lead_Score }}\",\n        \"mixpanelId\": \"{{ $json.Mixpanel_ID }}\",\n        \"cohort\": \"{{ $json.Current_Cohort_Name }}\",\n      }\n    }\n  ],\n  \"listId\": {{ $json.heyreachListId }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3600,
+        -128
+      ],
+      "id": "12ed0e91-9b07-431b-ae47-e2976faa1804",
+      "name": "Send to HeyReach",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Prepare HeyReach status update for Master Sheet\nconst item = $input.item.json;\nconst currentDate = new Date().toISOString().split('T')[0];\n\nreturn {\n  Email: item.Email,\n  HeyReach_Status: 'Sent',\n  First_HeyReach_List_ID: item.First_HeyReach_List_ID || item.heyreachListId || item.Current_HeyReach_List_ID,\n  First_Sent_Date: item.First_Sent_Date || currentDate,\n  Current_HeyReach_List_ID: item.heyreachListId || item.Current_HeyReach_List_ID,\n  Last_Updated: currentDate\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3808,
+        0
+      ],
+      "id": "f5c3212e-ed38-40bc-8706-27e0b08b22f1",
+      "name": "Prepare HeyReach Status Update"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "1BaqUuy7QOAdCGId-T0L8LSJdkWqz7ZLIopRgOBMsajo",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "All users in mixpanel cohorts",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Email"
+          ],
+          "schema": [
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_Name",
+              "displayName": "First_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Last_Name",
+              "displayName": "Last_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company_Name",
+              "displayName": "Company_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Company_Size",
+              "displayName": "Company_Size",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "LinkedIn_URL",
+              "displayName": "LinkedIn_URL",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Department",
+              "displayName": "Department",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Lead_Score",
+              "displayName": "Lead_Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Persona_Category",
+              "displayName": "Persona_Category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Apollo_Person_ID",
+              "displayName": "Apollo_Person_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Source_Company_apolloOrgId",
+              "displayName": "Source_Company_apolloOrgId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Enrichment_Date",
+              "displayName": "Enrichment_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_Seen_Cohort",
+              "displayName": "First_Seen_Cohort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_Seen_Date",
+              "displayName": "First_Seen_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Last_Seen_Cohort",
+              "displayName": "Last_Seen_Cohort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Last_Seen_Date",
+              "displayName": "Last_Seen_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "HeyReach_Status",
+              "displayName": "HeyReach_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_HeyReach_List_ID",
+              "displayName": "First_HeyReach_List_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_Sent_Date",
+              "displayName": "First_Sent_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Last_Updated",
+              "displayName": "Last_Updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Mixpanel_ID",
+              "displayName": "Mixpanel_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Match_Confidence",
+              "displayName": "Match_Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Enrichment_Status",
+              "displayName": "Enrichment_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "needsApolloEnrichment",
+              "displayName": "needsApolloEnrichment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "wasEnriched",
+              "displayName": "wasEnriched",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        4032,
+        0
+      ],
+      "id": "c02de2e4-41f8-441c-8443-1031f60ee913",
+      "name": "Update Master - HeyReach Sent",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Y1Tsl7HZy6eWgvyc",
+          "name": "Google Sheets (karan.babbar@superjoin.ai)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "high-score",
+              "leftValue": "={{ $json.Lead_Score }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "has-org-id",
+              "leftValue": "={{ $json.Source_Company_apolloOrgId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            },
+            {
+              "id": "company-size",
+              "leftValue": "={{ $json.Company_Size }}",
+              "rightValue": 10,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "high-confidence",
+              "leftValue": "={{ $json.Match_Confidence }}",
+              "rightValue": 80,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        384
+      ],
+      "id": "1127683f-38cb-4d53-ae1a-5ad634936533",
+      "name": "Qualify for Expansion?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/v1/mixed_people/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "b6HrpYT4oTRXkbCJ8cU8nw"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"organization_ids\": [\"{{ $json.Source_Company_apolloOrgId }}\"],\n  \"titles\": [\n    \"revenue operations\",\n    \"revops manager\",\n    \"rev ops\",\n    \"marketing operations\",\n    \"marketing ops manager\",\n    \"mops\",\n    \"data analyst\",\n    \"analytics manager\",\n    \"business analyst\",\n    \"product analyst\"\n  ],\n  \"departments\": [\"operations\", \"analytics\", \"data\", \"business intelligence\"],\n  \"seniority_levels\": [\"manager\", \"director\", \"individual_contributor\"],\n  \"per_page\": 3,\n  \"page\": 1\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        384
+      ],
+      "id": "27f99ac3-ef96-47dc-b06f-e15a7862a01f",
+      "name": "Apollo - Expansion Search",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process expansion leads from Apollo search\nconst originalUser = items[0].json;\nconst searchResults = items[0].json.people || [];\nconst processedLeads = [];\n\nfunction shouldIncludeLeader(title, companySize) {\n  const t = title.toLowerCase();\n  if (companySize < 500 && (t.includes('founder') || t.includes('co-founder'))) return true;\n  if (companySize < 100 && t.includes('ceo')) return true;\n  if (companySize < 50 && t.includes('vp')) return true;\n  return false;\n}\n\nfor (const person of searchResults) {\n  // Skip if it's the same person\n  if (person.email && person.email.toLowerCase() === originalUser.Email.toLowerCase()) continue;\n  \n  // Only process if they have LinkedIn URL\n  if (!person.linkedin_url) continue;\n  \n  const title = (person.title || '').toLowerCase();\n  const departments = (person.departments || []).join(' ').toLowerCase();\n  const companySize = person.organization?.estimated_num_employees || 0;\n  \n  let score = 0;\n  let persona = 'Other';\n  \n  // Apply ICP scoring\n  if (title.includes('revenue operations') || title.includes('revops') ||\n      title.includes('marketing operations') || title.includes('marketing ops')) {\n    score = 5;\n    persona = 'RevOps/Marketing Ops';\n  }\n  else if (title.includes('data analyst') || title.includes('analytics') ||\n           title.includes('business analyst') || title.includes('product analyst')) {\n    score = 4;\n    persona = 'Data/Analytics';\n  }\n  else if (shouldIncludeLeader(title, companySize)) {\n    score = 4;\n    persona = 'Founder/Leadership';\n  }\n  else if (title.includes('business operations')) {\n    score = 3;\n    persona = 'Business Operations';\n  }\n  else {\n    score = 2;\n    persona = 'Adjacent Role';\n  }\n  \n  // Bonus if same department\n  if (originalUser.Department && departments.includes(originalUser.Department.toLowerCase())) {\n    score = Math.min(5, score + 1);\n  }\n  \n  processedLeads.push({\n    json: {\n      Email: person.email || '',\n      First_Name: person.first_name || '',\n      Last_Name: person.last_name || '',\n      Company_Name: person.organization?.name || originalUser.Company_Name,\n      Company_Size: companySize,\n      LinkedIn_URL: person.linkedin_url,\n      Title: person.title || '',\n      Department: (person.departments || []).join(', '),\n      Location: person.city ? `${person.city}, ${person.state || ''} ${person.country || ''}`.trim() : '',\n      Lead_Score: score,\n      Persona_Category: persona,\n      Reference_User_Email: originalUser.Email,\n      Reference_User_Mixpanel_ID: originalUser.Mixpanel_ID,\n      Reference_User_Name: originalUser.First_Name,\n      Reference_User_Cohort: originalUser.Current_Cohort_Name,\n      Source_Company_apolloOrgId: originalUser.Source_Company_apolloOrgId,\n      Apollo_Person_ID: person.id || '',\n      Enrichment_Date: new Date().toISOString().split('T')[0],\n      HeyReach_Status: 'Pending',\n      Last_Updated: new Date().toISOString().split('T')[0]\n    }\n  });\n}\n\n// Return top 3 by score\nprocessedLeads.sort((a, b) => b.json.Lead_Score - a.json.Lead_Score);\nreturn processedLeads.slice(0, 3);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        384
+      ],
+      "id": "f74a175e-d5de-48f0-92aa-d8be6485cd35",
+      "name": "Process Expansion Leads"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1BaqUuy7QOAdCGId-T0L8LSJdkWqz7ZLIopRgOBMsajo",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "expansion leads - same company",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "Email"
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        672,
+        496
+      ],
+      "id": "feb4cec0-b4ba-405d-8312-c9bf8ada372b",
+      "name": "Update Expansion Sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Y1Tsl7HZy6eWgvyc",
+          "name": "Google Sheets (karan.babbar@superjoin.ai)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.Lead_Score }}",
+              "rightValue": 3,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        288
+      ],
+      "id": "519e705d-6eeb-4177-8254-0ab4486af20c",
+      "name": "Expansion Score >= 3?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.heyreach.io/api/public/list/AddLeadsToListV2",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "z9UvtCToHQeNLG+2XwN9DB4G3fGDRi+MMe4S1liu4Js="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"leads\": [\n    {\n      \"firstName\": \"{{ $json.First_Name }}\",\n      \"lastName\": \"{{ $json.Last_Name }}\",\n      \"email\": \"{{ $json.Email }}\",\n      \"companyName\": \"{{ $json.Company_Name }}\",\n      \"profileUrl\": \"{{ $json.LinkedIn_URL }}\",\n      \"title\": \"{{ $json.Title }}\",\n      \"customFields\": {\n        \"persona\": \"{{ $json.Persona_Category }}\",\n        \"leadScore\": \"{{ $json.Lead_Score }}\",\n        \"referenceUser\": \"{{ $json.Reference_User_Name }}\",\n        \"referenceCohort\": \"{{ $json.Reference_User_Cohort }}\"\n      }\n    }\n  ],\n  \"listId\": 324812\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        288
+      ],
+      "id": "1239f385-a522-4f0c-b7ac-aac1fa3a6368",
+      "name": "Send Expansion to HeyReach"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "advanced": true,
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "Email",
+              "field2": "Email"
+            }
+          ]
+        },
+        "joinMode": "keepEverything",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1344,
+        64
+      ],
+      "id": "91fe2980-c793-4291-afea-c04dd6148a62",
+      "name": "Merge",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "advanced": true,
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "Email",
+              "field2": "Email"
+            }
+          ]
+        },
+        "joinMode": "keepEverything",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2688,
+        0
+      ],
+      "id": "bab18a1a-e24c-40fb-a4ee-2cc7abc67935",
+      "name": "Merge1",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1W64oxN1TzMXzSF0XAYwD-F3EjeQpDu2w-c92hQ-YTwc/edit?pli=1&gid=1829180786#gid=1829180786",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1942208328,
+          "mode": "list",
+          "cachedResultName": "Day3 cohort - all ACTIVEs till date",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1W64oxN1TzMXzSF0XAYwD-F3EjeQpDu2w-c92hQ-YTwc/edit#gid=1942208328"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Email"
+          ],
+          "schema": [
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "First_Name",
+              "displayName": "First_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Name",
+              "displayName": "Last_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company_Name",
+              "displayName": "Company_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Company_Size",
+              "displayName": "Company_Size",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "LinkedIn_URL",
+              "displayName": "LinkedIn_URL",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Department",
+              "displayName": "Department",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lead_Score",
+              "displayName": "Lead_Score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Persona_Category",
+              "displayName": "Persona_Category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Apollo_Person_ID",
+              "displayName": "Apollo_Person_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Source_Company_apolloOrgId",
+              "displayName": "Source_Company_apolloOrgId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mixpanel_ID",
+              "displayName": "Mixpanel_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Current_Cohort_Name",
+              "displayName": "Current_Cohort_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Current_Cohort_ID",
+              "displayName": "Current_Cohort_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "First_Seen_Cohort",
+              "displayName": "First_Seen_Cohort",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Enrichment_Date",
+              "displayName": "Enrichment_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "HeyReach_Status",
+              "displayName": "HeyReach_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "HeyReach_List_ID",
+              "displayName": "HeyReach_List_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Already_Sent_Message",
+              "displayName": "Already_Sent_Message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Added_To_This_Cohort_Date",
+              "displayName": "Added_To_This_Cohort_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last_Updated",
+              "displayName": "Last_Updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Match_Confidence",
+              "displayName": "Match_Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Enrichment_Status",
+              "displayName": "Enrichment_Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "needsApolloEnrichment",
+              "displayName": "needsApolloEnrichment",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "wasEnriched",
+              "displayName": "wasEnriched",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "firstName",
+              "displayName": "firstName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "companyGuess",
+              "displayName": "companyGuess",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "heyreachListId",
+              "displayName": "heyreachListId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "cohortTabName",
+              "displayName": "cohortTabName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "hasLinkedIn",
+              "displayName": "hasLinkedIn",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "skipHeyreach",
+              "displayName": "skipHeyreach",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mixpanel_Cohort_ID",
+              "displayName": "Mixpanel_Cohort_ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mixpanel_Cohort_Name",
+              "displayName": "Mixpanel_Cohort_Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "First_Sent_Date",
+              "displayName": "First_Sent_Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        4048,
+        240
+      ],
+      "id": "cdab6084-a1d4-47b6-aa6a-fed8f5c093be",
+      "name": "Update Cohort Tab (ALL USERS)1",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "Y1Tsl7HZy6eWgvyc",
+          "name": "Google Sheets (karan.babbar@superjoin.ai)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 22,
+              "triggerAtMinute": 45
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "3a47c4d4-dff9-45a8-8bcd-7785813f0644",
+      "name": "Schedule Trigger - 10:45 PM Daily"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cohort Configuration": {
+      "main": [
+        [
+          {
+            "node": "Mixpanel - Fetch Cohort Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mixpanel - Fetch Cohort Users": {
+      "main": [
+        [
+          {
+            "node": "Parse ALL Mixpanel Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse ALL Mixpanel Users": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit - Pre Lookup (2s)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit - Pre Lookup (2s)": {
+      "main": [
+        [
+          {
+            "node": "Lookup in Master Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup in Master Sheet": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Check Existing Enrichment Status": {
+      "main": [
+        [
+          {
+            "node": "Needs Apollo Enrichment?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Apollo Enrichment?": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit - Apollo (3s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit - Apollo (3s)": {
+      "main": [
+        [
+          {
+            "node": "Apollo - Person Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo - Person Match": {
+      "main": [
+        [
+          {
+            "node": "Process Apollo & Score ICP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Apollo & Score ICP": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Update Master Sheet (ALL USERS)": {
+      "main": [
+        [
+          {
+            "node": "Update Cohort Tab (ALL USERS)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Cohort Tab (ALL USERS)": {
+      "main": [
+        [
+          {
+            "node": "Qualify for HeyReach?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qualify for HeyReach?": {
+      "main": [
+        [
+          {
+            "node": "Send to HeyReach",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to HeyReach": {
+      "main": [
+        [
+          {
+            "node": "Prepare HeyReach Status Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare HeyReach Status Update": {
+      "main": [
+        [
+          {
+            "node": "Update Master - HeyReach Sent",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Cohort Tab (ALL USERS)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qualify for Expansion?": {
+      "main": [
+        [
+          {
+            "node": "Apollo - Expansion Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apollo - Expansion Search": {
+      "main": [
+        [
+          {
+            "node": "Process Expansion Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Expansion Leads": {
+      "main": [
+        [
+          {
+            "node": "Update Expansion Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expansion Score >= 3?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expansion Score >= 3?": {
+      "main": [
+        [
+          {
+            "node": "Send Expansion to HeyReach",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Check Existing Enrichment Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Update Master Sheet (ALL USERS)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger - 10:45 PM Daily": {
+      "main": [
+        [
+          {
+            "node": "Cohort Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "11d7f1f1-b85d-404a-9604-cf0b4c4a08b2",
+  "meta": {
+    "instanceId": "2645319b6a8fe505960c99d8bd79650702b4c84fb7ebe8b3d152087d7252eef0"
+  },
+  "id": "r7JLO9wz6XHOt9bD",
+  "tags": []
+}
