@@ -22,7 +22,7 @@ Over one month (Aug–Sep 2025), I reverse-engineered the HubSpot Marketplace ra
 - Paid installs: **103** (32.6% of total)
 - Top install hub: **sales-hub-enterprise** — the target ICP
 
-![Impressions vs Clicks Chart](assets/Screenshot_2026-01-21_at_3_29_14_PM.png)
+![Impressions vs Clicks Chart](assets/Screenshot 2026-01-21 at 3.29.14 PM.png)
 
 *HubSpot Marketplace Search Analytics — Jan 2025 to Jan 2026 (weekly)*
 
@@ -208,7 +208,7 @@ The Impressions vs Clicks chart shows three distinct phases:
 
 **Uninstalls (Sep–Nov):** 7 → 36 → 39 — growing with install volume, proportional. Uninstall-to-install ratio remains healthy.
 
-![Install Analytics](assets/16BFA12F-3B9B-451A-B8DE-3372C552AD3D_1_105_c.jpeg)
+![Install Analytics](assets/IMG_2048.PNG)
 
 ---
 
@@ -228,7 +228,7 @@ The Impressions vs Clicks chart shows three distinct phases:
 
 **Installs by country (top):** United States (93), Morocco (9), Poland (22), Mexico (22), Ireland (16), Malaysia (14)
 
-![Installs by Hub and Country](assets/29EAB58C-1088-4B20-A2C2-EC3303E250AD_1_105_c.jpeg)
+![Installs by Hub and Country](assets/IMG_2052.PNG)
 
 ---
 
@@ -251,7 +251,7 @@ The Impressions vs Clicks chart shows three distinct phases:
 
 **Top pageview countries:** United States (543), Australia (61), South Africa (28)
 
-![Listing Analytics](assets/3527A022-A0F5-497E-94D4-22BA6E14B6D7_1_105_c.jpeg)
+![Listing Analytics](assets/IMG_2054.PNG)
 
 ---
 
